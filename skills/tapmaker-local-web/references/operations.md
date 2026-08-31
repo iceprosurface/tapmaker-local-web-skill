@@ -49,7 +49,13 @@ Runtime 缓存默认位于：
 
 `LocalWebProject` 将 `--code` 目录映射为一个只读本地资源树，使用 `.meta` UUID、文件 CRC32 和大小构造 Maker 兼容 manifest。`.meta` 不作为资源发布；`.git`、`.project`、`.maker-mcp`、`.env`、`.venv`、`node_modules`、系统元数据和其他隐藏路径不进入 manifest。
 
-浏览器每秒读取 `/__tapmaker/revision`。文件签名变化后，服务端复用未变资源的已有记录，更新 manifest client 并触发整页重载。localhost version 固定为 `local`，与 `version.toml` 无关；不要通过递增它来规避旧 manifest，否则会破坏稳定的 OPFS 资源缓存命名空间。
+服务端通过操作系统文件事件监听挂载目录，只在变化后扫描；浏览器通过
+`/__tapmaker/events` 的 SSE 事件流接收 revision。不支持 SSE 时才每秒轮询
+`/__tapmaker/revision`，轮询接口只读取内存状态。文件签名变化后，服务端复用未变资源的已有记录，更新 manifest client 并触发整页重载。localhost version 固定为 `local`，与 `version.toml` 无关；不要通过递增它来规避旧 manifest，否则会破坏稳定的 OPFS 资源缓存命名空间。
+
+已加载文件缺少同名 `.meta` 时，终端和预览页顶部会列出相对路径，
+`/__tapmaker/status` 也会在 `diagnostics.missing_meta` 返回完整列表。新增或删除
+`.meta` 会触发刷新；`.meta` 本身仍不进入 manifest。
 
 ## 诊断顺序
 
@@ -68,6 +74,12 @@ Runtime 缓存默认位于：
 ### 修改后没有重载
 
 直接请求 `/__tapmaker/revision`，确认 revision 是否改变，再检查文件是否位于 `--code` 指定的目录中。热重载是整页 reload，不是 Lua 函数级热替换；内存状态重置是预期行为。
+
+### 预览页提示缺少 `.meta`
+
+为提示中的每个相对资源路径补充同名 `<文件名>.meta`。如果文件不应加载，应将它移出
+挂载目录或加入现有安全过滤范围；不要只为隐藏提示而创建无效 JSON。保存有效 `.meta`
+后，文件监听器会更新 UUID、清除诊断并自动重载页面。
 
 ### 资源请求或 Runtime WARNING
 
