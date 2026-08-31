@@ -5,7 +5,9 @@ description = "Standalone local UrhoX Web preview for TapMaker Workspace"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "iceprosurface" }]
-dependencies = []
+dependencies = [
+    "watchfiles>=1.1,<2",
+]
 
 [project.scripts]
 tapmaker-local-web = "tapmaker_local_web.cli:main"

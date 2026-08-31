@@ -18,6 +18,8 @@ import uuid
 import webbrowser
 import zlib
 
+from watchfiles import watch
+
 from .config import Project, WorkspaceError, _render_build_info
 
 
@@ -182,6 +184,13 @@ INDEX_HTML = f"""<!doctype html>
     #dialog-box {{ min-width: 320px; padding: 24px; color: #fff; background: #353545;
       font: 16px system-ui, sans-serif; text-align: center; }}
     #dialog-cancel.hidden {{ display: none; }}
+    #tapmaker-diagnostics {{ position: fixed; top: 10px; left: 50%; z-index: 11000;
+      display: none; width: min(720px, calc(100vw - 20px)); max-height: 35vh;
+      box-sizing: border-box; overflow: auto; padding: 10px 14px; border: 1px solid #f7b955;
+      border-radius: 6px; color: #fff3d6; background: rgba(91, 52, 0, .94);
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      transform: translateX(-50%); white-space: pre-wrap; }}
+    #tapmaker-diagnostics.visible {{ display: block; }}
   </style>
 </head>
 <body oncontextmenu="return false">
@@ -192,6 +201,7 @@ INDEX_HTML = f"""<!doctype html>
   </div>
   <canvas id="canvas" tabindex="0"></canvas>
   <div id="version-info"></div>
+  <div id="tapmaker-diagnostics" role="status"></div>
   <div id="dialog-overlay"><div id="dialog-box">
     <h2 id="dialog-title"></h2><p id="dialog-message"></p>
     <button id="dialog-confirm">重新加载</button><button id="dialog-cancel" class="hidden"></button>
@@ -199,18 +209,53 @@ INDEX_HTML = f"""<!doctype html>
   <script>
     (() => {{
       let revision = null;
-      async function checkRevision() {{
+      const diagnostics = document.getElementById('tapmaker-diagnostics');
+
+      function applyRevision(next) {{
+        if (revision === null) revision = next;
+        else if (next !== revision) location.reload();
+      }}
+
+      function renderDiagnostics(status) {{
+        const missing = status?.diagnostics?.missing_meta || [];
+        if (!missing.length) {{
+          diagnostics.classList.remove('visible');
+          diagnostics.textContent = '';
+          return;
+        }}
+        diagnostics.textContent =
+          `缺少 .meta（${{missing.length}}）\\n` + missing.map(path => `• ${{path}}`).join('\\n');
+        diagnostics.classList.add('visible');
+      }}
+
+      async function loadStatus() {{
+        const response = await fetch('/__tapmaker/status', {{ cache: 'no-store' }});
+        const status = await response.json();
+        renderDiagnostics(status);
+        applyRevision(status.revision);
+      }}
+
+      async function pollRevision() {{
         try {{
           const response = await fetch('/__tapmaker/revision', {{ cache: 'no-store' }});
           const next = await response.json();
-          if (revision === null) revision = next.revision;
-          else if (next.revision !== revision) location.reload();
+          applyRevision(next.revision);
         }} catch (_) {{
         }} finally {{
-          setTimeout(checkRevision, 1000);
+          setTimeout(pollRevision, 1000);
         }}
       }}
-      checkRevision();
+
+      loadStatus().catch(() => {{}}).finally(() => {{
+        if ('EventSource' in window) {{
+          const events = new EventSource('/__tapmaker/events');
+          events.addEventListener('revision', event => {{
+            try {{ applyRevision(JSON.parse(event.data).revision); }} catch (_) {{}}
+          }});
+        }} else {{
+          pollRevision();
+        }}
+      }});
     }})();
   </script>
   <script src="{PLAYER_SCRIPT_URL}"></script>
@@ -258,6 +303,12 @@ class _CachedAsset:
     record: AssetRecord
 
 
+@dataclass(frozen=True)
+class _CandidateCollection:
+    files: tuple[tuple[str, Path | None, bytes | None, tuple[object, ...]], ...]
+    missing_meta: tuple[str, ...]
+
+
 class LocalWebProject:
     """将 TapMaker 挂载树暴露为 UrhoX Web Player 可读取的本地清单。"""
 
@@ -276,8 +327,9 @@ class LocalWebProject:
         self._assets: dict[str, AssetRecord] = {}
         self._manifest: dict[str, object] = {}
         self._fingerprint: tuple[tuple[str, tuple[object, ...]], ...] = ()
+        self._missing_meta: tuple[str, ...] = ()
         self._build_epoch = time.time_ns() // 1_000
-        self._last_refresh_at = 0.0
+        self._revision_changed = threading.Condition(self._lock)
         self.revision = 0
         self.refresh()
 
@@ -288,8 +340,8 @@ class LocalWebProject:
 
     def refresh(self) -> bool:
         with self._lock:
-            candidates = self._collect_candidates()
-            self._last_refresh_at = time.monotonic()
+            collection = self._collect_candidates()
+            candidates = collection.files
             fingerprint = tuple((path, signature) for path, _, _, signature in candidates)
             if fingerprint == self._fingerprint:
                 return False
@@ -318,14 +370,10 @@ class LocalWebProject:
             self._assets = {record.asset_name: record for record in records}
             self._manifest = self._build_manifest(records)
             self._fingerprint = fingerprint
+            self._missing_meta = collection.missing_meta
             self.revision += 1
+            self._revision_changed.notify_all()
             return True
-
-    def refresh_if_due(self, max_age: float = 0.75) -> bool:
-        with self._lock:
-            if time.monotonic() - self._last_refresh_at < max_age:
-                return False
-            return self.refresh()
 
     def manifest(self) -> dict[str, object]:
         with self._lock:
@@ -345,6 +393,20 @@ class LocalWebProject:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "engine": LOCAL_ENGINE,
         }
+
+    def diagnostics(self) -> dict[str, object]:
+        with self._lock:
+            missing = list(self._missing_meta)
+        return {"missing_meta": missing, "missing_meta_count": len(missing)}
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return {"revision": self.build, "diagnostics": self.diagnostics()}
+
+    def wait_for_revision(self, previous: int, timeout: float) -> int:
+        with self._revision_changed:
+            self._revision_changed.wait_for(lambda: self.build != previous, timeout=timeout)
+            return self.build
 
     @property
     def build(self) -> int:
@@ -373,8 +435,9 @@ class LocalWebProject:
 
     def _collect_candidates(
         self,
-    ) -> list[tuple[str, Path | None, bytes | None, tuple[object, ...]]]:
+    ) -> _CandidateCollection:
         candidates: dict[str, tuple[Path | None, bytes | None, tuple[object, ...]]] = {}
+        missing_meta: set[str] = set()
         for mount in self.project.mounts:
             sources = (
                 sorted(path for path in mount.source.rglob("*") if path.is_file())
@@ -391,6 +454,8 @@ class LocalWebProject:
                 if virtual in candidates:
                     raise WorkspaceError(f"本地 Web 挂载冲突：{virtual}")
                 candidates[virtual] = (source, None, self._source_signature(source))
+                if not source.with_name(f"{source.name}.meta").is_file():
+                    missing_meta.add(self._filesystem_path(virtual))
 
         if self.project.build_info_target is not None:
             virtual = self.project.build_info_target.as_posix()
@@ -460,10 +525,13 @@ class LocalWebProject:
                 ("generated-platform-mock", wrapper, signature),
             )
 
-        return [
-            (virtual, source, content, signature)
-            for virtual, (source, content, signature) in sorted(candidates.items())
-        ]
+        return _CandidateCollection(
+            files=tuple(
+                (virtual, source, content, signature)
+                for virtual, (source, content, signature) in sorted(candidates.items())
+            ),
+            missing_meta=tuple(sorted(missing_meta)),
+        )
 
     def _source_signature(self, source: Path) -> tuple[object, ...]:
         stat = source.stat()
@@ -622,6 +690,8 @@ class LocalWebServer(ThreadingHTTPServer):
     ):
         self.state = state
         self.runtime_dir = runtime_dir
+        self._watch_stop = threading.Event()
+        self._watch_thread: threading.Thread | None = None
         super().__init__(address, _LocalWebHandler)
 
     @property
@@ -633,6 +703,112 @@ class LocalWebServer(ThreadingHTTPServer):
         if self.runtime_dir is not None:
             query += "&local_engine=true"
         return f"http://{display_host}:{port}/?{query}"
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self._start_watcher()
+        try:
+            super().serve_forever(poll_interval)
+        finally:
+            self._stop_watcher()
+
+    def shutdown(self) -> None:
+        self._watch_stop.set()
+        super().shutdown()
+
+    def server_close(self) -> None:
+        self._stop_watcher()
+        super().server_close()
+
+    def _start_watcher(self) -> None:
+        if self._watch_thread is not None:
+            return
+        paths = self._watch_paths()
+        if not paths:
+            return
+        self._watch_stop.clear()
+        self._watch_thread = threading.Thread(
+            target=self._watch_loop,
+            args=(paths,),
+            name="tapmaker-file-watcher",
+            daemon=True,
+        )
+        self._watch_thread.start()
+
+    def _stop_watcher(self) -> None:
+        self._watch_stop.set()
+        thread = self._watch_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._watch_thread = None
+
+    def _watch_paths(self) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for mount in self.state.project.mounts:
+            paths.append(mount.source if mount.source.is_dir() else mount.source.parent)
+        settings = (
+            self.state.deployment.cache / ".project/settings.json"
+            if self.state.deployment.cache is not None
+            else None
+        )
+        for source in (settings, self.state.project.version_file):
+            if source is not None:
+                parent = source.parent
+                if parent.is_dir():
+                    paths.append(parent)
+        return tuple(dict.fromkeys(path.resolve() for path in paths))
+
+    def _watch_filter(self, _change: object, changed: str) -> bool:
+        candidate = Path(changed).resolve()
+        for mount in self.state.project.mounts:
+            source = mount.source.resolve()
+            if source.is_dir() and candidate.is_relative_to(source):
+                return not _is_operating_system_metadata(candidate.relative_to(source))
+            if candidate in (source, source.with_name(f"{source.name}.meta")):
+                return True
+        settings = (
+            self.state.deployment.cache / ".project/settings.json"
+            if self.state.deployment.cache is not None
+            else None
+        )
+        return candidate in {
+            source.resolve()
+            for source in (settings, self.state.project.version_file)
+            if source is not None
+        }
+
+    def _watch_loop(self, paths: tuple[Path, ...]) -> None:
+        try:
+            for _changes in watch(
+                *paths,
+                watch_filter=self._watch_filter,
+                debounce=200,
+                step=50,
+                stop_event=self._watch_stop,
+                raise_interrupt=False,
+            ):
+                previous_missing = tuple(self.state.diagnostics()["missing_meta"])
+                changed = self._refresh_after_change()
+                if changed:
+                    current_missing = tuple(self.state.diagnostics()["missing_meta"])
+                    if current_missing != previous_missing:
+                        _print_missing_meta(current_missing)
+        except Exception as error:
+            if not self._watch_stop.is_set():
+                print(f"tapmaker-local-web: 文件监听失败：{error}", file=sys.stderr)
+
+    def _refresh_after_change(self) -> bool:
+        error: OSError | WorkspaceError | None = None
+        for attempt in range(3):
+            try:
+                return self.state.refresh()
+            except (OSError, WorkspaceError) as caught:
+                error = caught
+                if attempt < 2 and not self._watch_stop.wait(0.05):
+                    continue
+                break
+        if not self._watch_stop.is_set():
+            print(f"tapmaker-local-web: 文件变化后刷新失败：{error}", file=sys.stderr)
+        return False
 
 
 class _LocalWebHandler(BaseHTTPRequestHandler):
@@ -658,11 +834,15 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 self._send(200, INDEX_HTML, "text/html; charset=utf-8", head_only)
                 return
             if path == "/__tapmaker/revision":
-                self.server.state.refresh_if_due()
                 self._send_json({"revision": self.server.state.build}, head_only)
                 return
+            if path == "/__tapmaker/status":
+                self._send_json(self.server.state.status(), head_only)
+                return
+            if path == "/__tapmaker/events" and not head_only:
+                self._send_events()
+                return
             if path in ("/latest.json", f"/{self.server.state.version}/version.json"):
-                self.server.state.refresh_if_due()
                 self._send_json(self.server.state.latest(), head_only)
                 return
             if path in ("/project.json", f"/{self.server.state.version}/project.json"):
@@ -688,7 +868,6 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"tag": "stable", "base_url": ENGINE_BASE_URL}, head_only)
                 return
             if path == f"/{self.server.state.version}/manifest-{self.server.state.client}.json":
-                self.server.state.refresh_if_due()
                 self._send_json(self.server.state.manifest(), head_only)
                 return
             if path.startswith("/assets/") and path.count("/") == 2:
@@ -710,6 +889,27 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 )
             except (BrokenPipeError, ConnectionResetError):
                 return
+
+    def _send_events(self) -> None:
+        self.send_response(200)
+        self._common_headers()
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        previous = -1
+        while not self.server._watch_stop.is_set():
+            revision = (
+                self.server.state.build
+                if previous < 0
+                else self.server.state.wait_for_revision(previous, timeout=15)
+            )
+            if revision == previous:
+                self.wfile.write(b": keep-alive\n\n")
+            else:
+                payload = json.dumps({"revision": revision}, separators=(",", ":"))
+                self.wfile.write(f"event: revision\ndata: {payload}\n\n".encode("utf-8"))
+                previous = revision
+            self.wfile.flush()
 
     def _send_json(self, value: object, head_only: bool) -> None:
         body = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
@@ -739,6 +939,15 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
         return
 
 
+def _print_missing_meta(paths: tuple[str, ...]) -> None:
+    if not paths:
+        print("资源检查：所有已加载文件均存在对应 .meta")
+        return
+    print(f"警告：{len(paths)} 个已加载文件缺少对应 .meta：", file=sys.stderr)
+    for path in paths:
+        print(f"  - {path}", file=sys.stderr)
+
+
 def serve_local_web(
     project: Project,
     *,
@@ -760,6 +969,7 @@ def serve_local_web(
         f"项目={project.name} target={state.deployment.name} entry={state.deployment.entry} "
         f"files={len(state.manifest()['files'])}"
     )
+    _print_missing_meta(tuple(state.diagnostics()["missing_meta"]))
     print("源码变化后页面会自动重新加载；按 Ctrl-C 停止。")
     print(f"Runtime={'本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN'}")
     print(f"平台能力={'本地 mock' if platform_mock else 'Runtime 原始能力'}")

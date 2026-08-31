@@ -231,13 +231,19 @@ tapmaker-local-web web \
 
 ## 热重载
 
-浏览器每秒读取一次 `/__tapmaker/revision`。
+服务端使用操作系统文件事件递归监听挂载目录。浏览器通过
+`/__tapmaker/events` 的 Server-Sent Events 接收 revision；不支持 SSE 时才每秒读取一次
+`/__tapmaker/revision`，该接口只读取内存状态，不扫描文件系统。
 
-服务端会合并短时间内的并发扫描，并复用未变化资源的缓存记录。发现脚本、资源或对应 `.meta` 变化后：
+服务端会合并短时间内的连续文件事件。发现脚本、资源或对应 `.meta` 变化后才扫描一次，
+并复用未变化资源的缓存记录：
 
 1. 更新资源记录和 manifest client。
 2. revision 递增。
 3. 页面执行整页 reload。
+
+已加载文件缺少同名 `.meta` 时，启动终端和预览页顶部都会列出相对资源路径。
+新增或删除 `.meta` 同样会触发刷新；`.meta` 只提供 UUID，不会作为资源发布。
 
 这是页面级重载，不是 Lua 函数级热替换，因此当前内存状态会重置。
 
@@ -271,6 +277,8 @@ localhost 的 Runtime version 固定为 `local`。变化的是 manifest client�
 | `/local/manifest-<client>.json` | 当前资源 manifest |
 | `/assets/...` | 按需读取本地资源 |
 | `/__tapmaker/revision` | 热重载 revision |
+| `/__tapmaker/events` | revision SSE 事件流 |
+| `/__tapmaker/status` | revision 与资源诊断 |
 | `/UrhoXRuntime.*` | 本地 Runtime 模式下的核心文件 |
 
 所有响应默认使用 `Cache-Control: no-store`，并提供 WebAssembly 运行需要的 COOP、COEP 和 CORS header。
@@ -293,7 +301,9 @@ uv run --project skills/tapmaker-local-web/scripts \
 - 平台入口包装与禁用 mock
 - manifest、资源与 CORS HTTP 接口
 - 资源路径穿越拒绝
-- 并发 revision 请求合并扫描
+- revision 请求不触发文件系统扫描
+- 原生文件事件触发单次刷新并通过 SSE 发布 revision
+- 缺失 `.meta` 的诊断与修复后清除
 - 文件修改后的 revision 与资源 URL 更新
 - Runtime 下载、校验、缓存和 WASM Content-Type
 
