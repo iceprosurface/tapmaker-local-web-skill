@@ -279,9 +279,12 @@ localhost 的 Runtime version 固定为 `local`。变化的是 manifest client�
 | `/__tapmaker/revision` | 热重载 revision |
 | `/__tapmaker/events` | revision SSE 事件流 |
 | `/__tapmaker/status` | revision 与资源诊断 |
-| `/UrhoXRuntime.*` | 本地 Runtime 模式下的核心文件 |
+| `/UrhoXRuntime.*` | 本地 Runtime 模式下的核心文件，支持 ETag 重验证 |
 
-所有响应默认使用 `Cache-Control: no-store`，并提供 WebAssembly 运行需要的 COOP、COEP 和 CORS header。
+动态响应默认使用 `Cache-Control: no-store`。本地 Runtime 三件套使用
+`private, no-cache` 与 ETag，浏览器刷新时可重验证并复用已有响应；内容寻址的
+`/assets/<uuid>-<crc>.<ext>` 使用一年期 immutable 缓存。所有响应均提供
+WebAssembly 运行需要的 COOP、COEP 和 CORS header。
 
 ## 测试
 
@@ -306,6 +309,7 @@ uv run --project skills/tapmaker-local-web/scripts \
 - 缺失 `.meta` 的诊断与修复后清除
 - 文件修改后的 revision 与资源 URL 更新
 - Runtime 下载、校验、缓存和 WASM Content-Type
+- Runtime ETag/304 重验证与内容寻址资源长期缓存
 
 验证 Skill 结构：
 

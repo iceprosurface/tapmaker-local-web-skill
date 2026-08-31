@@ -33,6 +33,9 @@ LOCAL_ENGINE = "stable"
 RUNTIME_FILES = ("UrhoXRuntime.js", "UrhoXRuntime.wasm", "UrhoXRuntime.data")
 LOCAL_PROJECT_ENTRY = "__tapmaker_project_entry.lua"
 LOCAL_USER_ID = 900000001
+DYNAMIC_CACHE_CONTROL = "no-store"
+RUNTIME_CACHE_CONTROL = "private, no-cache"
+IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 BLOCKING_EXTENSIONS = {
     ".lua",
@@ -83,6 +86,36 @@ def current_web_runtime(cache_root: Path | None = None) -> Path | None:
     except (OSError, json.JSONDecodeError):
         pass
     return None
+
+
+def _runtime_etags(runtime_dir: Path | None) -> dict[str, str]:
+    if runtime_dir is None:
+        return {}
+    hashes: dict[str, str] = {}
+    try:
+        metadata = json.loads((runtime_dir / "runtime.json").read_text(encoding="utf-8"))
+        files = metadata.get("files", {})
+        if isinstance(files, dict):
+            for name in RUNTIME_FILES:
+                item = files.get(name)
+                checksum = item.get("hash") if isinstance(item, dict) else None
+                if (
+                    isinstance(checksum, str)
+                    and len(checksum) == 8
+                    and all(character in "0123456789abcdefABCDEF" for character in checksum)
+                ):
+                    hashes[name] = f'"runtime-{checksum.lower()}"'
+    except (OSError, json.JSONDecodeError):
+        pass
+    for name in RUNTIME_FILES:
+        if name in hashes:
+            continue
+        try:
+            stat = (runtime_dir / name).stat()
+        except OSError:
+            continue
+        hashes[name] = f'W/"runtime-{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+    return hashes
 
 
 def sync_web_runtime(
@@ -690,6 +723,7 @@ class LocalWebServer(ThreadingHTTPServer):
     ):
         self.state = state
         self.runtime_dir = runtime_dir
+        self.runtime_etags = _runtime_etags(runtime_dir)
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         super().__init__(address, _LocalWebHandler)
@@ -814,6 +848,12 @@ class LocalWebServer(ThreadingHTTPServer):
 class _LocalWebHandler(BaseHTTPRequestHandler):
     server: LocalWebServer
 
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def do_GET(self) -> None:  # noqa: N802
         self._handle(head_only=False)
 
@@ -852,16 +892,18 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"env": "local"}, head_only)
                 return
             if path.removeprefix("/") in RUNTIME_FILES and self.server.runtime_dir is not None:
-                runtime_file = self.server.runtime_dir / path.removeprefix("/")
+                runtime_name = path.removeprefix("/")
+                runtime_file = self.server.runtime_dir / runtime_name
                 if runtime_file.is_file():
                     media_type = mimetypes.guess_type(runtime_file.name)[0]
                     if runtime_file.suffix == ".wasm":
                         media_type = "application/wasm"
-                    self._send(
-                        200,
-                        runtime_file.read_bytes(),
+                    self._send_file(
+                        runtime_file,
                         media_type or "application/octet-stream",
                         head_only,
+                        cache_control=RUNTIME_CACHE_CONTROL,
+                        etag=self.server.runtime_etags.get(runtime_name),
                     )
                     return
             if path == f"/{self.server.state.version}/engine-{LOCAL_ENGINE}.json":
@@ -874,7 +916,7 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 asset = self.server.state.asset(path.removeprefix("/assets/"))
                 if asset is not None:
                     media_type = mimetypes.guess_type(asset.fs_path)[0] or "application/octet-stream"
-                    self._send(200, asset.read(), media_type, head_only)
+                    self._send_asset(asset, media_type, head_only)
                     return
             self._send(404, b"not found\n", "text/plain; charset=utf-8", head_only)
         except (BrokenPipeError, ConnectionResetError):
@@ -917,17 +959,76 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
         )
         self._send(200, body, "application/json; charset=utf-8", head_only)
 
-    def _send(self, status: int, body: bytes, media_type: str, head_only: bool) -> None:
+    def _send_asset(self, asset: AssetRecord, media_type: str, head_only: bool) -> None:
+        etag = f'"asset-{asset.crc32}"'
+        if self._send_not_modified(etag, IMMUTABLE_CACHE_CONTROL):
+            return
+        self._send(
+            200,
+            asset.read(),
+            media_type,
+            head_only,
+            cache_control=IMMUTABLE_CACHE_CONTROL,
+            etag=etag,
+        )
+
+    def _send_file(
+        self,
+        path: Path,
+        media_type: str,
+        head_only: bool,
+        *,
+        cache_control: str,
+        etag: str | None,
+    ) -> None:
+        if etag is not None and self._send_not_modified(etag, cache_control):
+            return
+        size = path.stat().st_size
+        self.send_response(200)
+        self._common_headers(cache_control)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(size))
+        if etag is not None:
+            self.send_header("ETag", etag)
+        self.end_headers()
+        if not head_only:
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+
+    def _send_not_modified(self, etag: str, cache_control: str) -> bool:
+        candidates = {
+            candidate.strip() for candidate in self.headers.get("If-None-Match", "").split(",")
+        }
+        if etag not in candidates and "*" not in candidates:
+            return False
+        self.send_response(304)
+        self._common_headers(cache_control)
+        self.send_header("ETag", etag)
+        self.end_headers()
+        return True
+
+    def _send(
+        self,
+        status: int,
+        body: bytes,
+        media_type: str,
+        head_only: bool,
+        *,
+        cache_control: str = DYNAMIC_CACHE_CONTROL,
+        etag: str | None = None,
+    ) -> None:
         self.send_response(status)
-        self._common_headers()
+        self._common_headers(cache_control)
         self.send_header("Content-Type", media_type)
         self.send_header("Content-Length", str(len(body)))
+        if etag is not None:
+            self.send_header("ETag", etag)
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
 
-    def _common_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store")
+    def _common_headers(self, cache_control: str = DYNAMIC_CACHE_CONTROL) -> None:
+        self.send_header("Cache-Control", cache_control)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")

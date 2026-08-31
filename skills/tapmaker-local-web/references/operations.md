@@ -57,6 +57,11 @@ Runtime 缓存默认位于：
 `/__tapmaker/status` 也会在 `diagnostics.missing_meta` 返回完整列表。新增或删除
 `.meta` 会触发刷新；`.meta` 本身仍不进入 manifest。
 
+本地 Runtime 三件套使用 ETag 和 `Cache-Control: private, no-cache`。浏览器刷新时仍会
+向 localhost 重验证，但内容未变化时返回 304 并复用浏览器缓存，不会再次传输大型
+`.wasm`/`.data` 响应。项目资源 URL 包含 UUID 与 CRC，因此使用一年期 immutable
+缓存；HTML、manifest、revision、status 与 SSE 保持 `no-store`。
+
 ## 诊断顺序
 
 ### CLI 没有 `web`

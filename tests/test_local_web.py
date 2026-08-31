@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import zlib
 
 from tapmaker_local_web import Workspace
@@ -270,6 +270,19 @@ target = "assets"
             asset_name = f"{main['uuid']}-{main['hash']}{main['ext']}"
             with urlopen(f"{base}/assets/{asset_name}") as response:
                 self.assertEqual(response.read(), b"return true\n")
+                self.assertEqual(
+                    response.headers["Cache-Control"], "public, max-age=31536000, immutable"
+                )
+                asset_etag = response.headers["ETag"]
+            self.assertEqual(asset_etag, f'"asset-{main["hash"]}"')
+            with self.assertRaises(HTTPError) as not_modified:
+                urlopen(
+                    Request(
+                        f"{base}/assets/{asset_name}",
+                        headers={"If-None-Match": asset_etag},
+                    )
+                )
+            self.assertEqual(not_modified.exception.code, 304)
             with self.assertRaises(HTTPError) as missing:
                 urlopen(f"{base}/assets/../tapmaker.toml")
             self.assertEqual(missing.exception.code, 404)
@@ -322,9 +335,17 @@ target = "assets"
         try:
             self.assertIn("local_engine=true", server.url)
             self.assertIn("screen_orientation=landscape", server.url)
-            with urlopen(f"http://127.0.0.1:{server.server_port}/UrhoXRuntime.wasm") as response:
+            runtime_url = f"http://127.0.0.1:{server.server_port}/UrhoXRuntime.wasm"
+            with urlopen(runtime_url) as response:
                 self.assertEqual(response.headers["Content-Type"], "application/wasm")
+                self.assertEqual(response.headers["Cache-Control"], "private, no-cache")
+                runtime_etag = response.headers["ETag"]
                 self.assertEqual(response.read(), b"runtime wasm")
+            expected_hash = f"{zlib.crc32(contents['UrhoXRuntime.wasm']) & 0xFFFFFFFF:08x}"
+            self.assertEqual(runtime_etag, f'"runtime-{expected_hash}"')
+            with self.assertRaises(HTTPError) as not_modified:
+                urlopen(Request(runtime_url, headers={"If-None-Match": runtime_etag}))
+            self.assertEqual(not_modified.exception.code, 304)
         finally:
             server.shutdown()
             server.server_close()
