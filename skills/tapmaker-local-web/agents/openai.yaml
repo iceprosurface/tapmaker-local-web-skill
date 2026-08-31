@@ -1,0 +1,4 @@
+interface:
+  display_name: "TapMaker Local Web"
+  short_description: "启动、验收并排查 TapMaker 本地 Web 预览工作流"
+  default_prompt: "使用 $tapmaker-local-web 启动并验证当前 TapMaker 项目的本地 Web 预览。"
