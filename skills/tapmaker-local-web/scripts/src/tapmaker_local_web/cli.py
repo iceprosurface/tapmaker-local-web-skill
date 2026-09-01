@@ -30,6 +30,7 @@ def parser() -> argparse.ArgumentParser:
     web.add_argument("--runtime", choices=("auto", "local", "remote"), default="auto")
     web.add_argument("--runtime-cache", type=Path)
     web.add_argument("--no-platform-mock", action="store_true")
+    web.add_argument("--debug-bridge", action="store_true", help="启用仅限 loopback 的 CDP 调试桥")
 
     runtime = subcommands.add_parser("web-runtime", help="同步和查看本地 Web Runtime")
     runtime_commands = runtime.add_subparsers(dest="runtime_command", required=True)
@@ -61,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime=args.runtime,
             runtime_cache=args.runtime_cache,
             platform_mock=not args.no_platform_mock,
+            debug_bridge=args.debug_bridge,
         )
         return 0
     except (WorkspaceError, KeyError, OSError, tomllib.TOMLDecodeError) as error:
