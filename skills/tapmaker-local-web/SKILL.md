@@ -18,6 +18,12 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 7. 至少确认项目入口已执行、目标功能可见或可操作、本次涉及的代表性资源实际加载，且浏览器与引擎日志没有相关 `ERROR`。修改一个任务内文件后，确认页面能在 revision 变化后自动重载。
 8. 验收后停止服务器，除非用户明确要求保持运行。最终回报 entry、URL、Runtime 模式、验收结果和是否已停止；不在公开回报中暴露本机绝对路径。
 
+## CDP 自动化
+
+需要直接操作 Canvas 内的运行时 UI 时，启动命令追加 `--debug-bridge`。它只允许 loopback host，页面通过 `window.__tapmakerLocal` 暴露 `snapshot`、`query`、`coordinates`、`click` 与白名单 `call`；使用浏览器自动化的 evaluate/CDP 读取返回值，不要猜测像素坐标。
+
+`call(name, payload)` 不执行任意 Lua。若项目需要提供内部状态或测试动作，只能在 `BuildInfo.is_local` 分支通过 `rawget(_G, "__tapmaker_local_debug").register(name, handler)` 显式注册，并验证 payload、返回 JSON 可序列化的最小状态。不得注册求值、文件系统、网络或 production 行为。
+
 ## 行为边界
 
 - `--runtime auto` 是默认值：优先本地 Runtime，无缓存时使用 CDN。只在验证本地缓存时用 `local`，在差分 Runtime 缓存问题时用 `remote`。
@@ -25,5 +31,6 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 - Runtime 同步只本地化 `UrhoXRuntime.js`、`UrhoXRuntime.wasm` 和 `UrhoXRuntime.data`。Player 外壳、engine-res、official-res 仍可能访问 CDN；不得宣称完全离线。
 - 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 Maker test 发布流程；未经授权不得触发远程构建。
 - 将 host 绑定为 `0.0.0.0` 会把无登录保护、允许跨源读取的项目服务暴露给局域网。只在用户要求其他设备访问且网络可信时使用。
+- `--debug-bridge` 是额外的本地调试能力，不能和 `--host 0.0.0.0` 一起使用，也不能作为真实平台或 production 验收证据。
 
 启动参数、资源诊断或常见错误需要更多细节时，读取 [操作与排错](references/operations.md)。

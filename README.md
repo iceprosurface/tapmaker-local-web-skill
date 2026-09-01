@@ -131,6 +131,7 @@ tapmaker-local-web web \
 | `--runtime auto\|local\|remote` | `auto` | 选择 Runtime 来源 |
 | `--runtime-cache` | 用户缓存 | 覆盖 Runtime 缓存目录 |
 | `--no-platform-mock` | 关闭 | 禁用本地账号、昵称和云值 mock |
+| `--debug-bridge` | 关闭 | 注入仅限 loopback 的 CDP 调试桥 |
 
 `--entry` 必须：
 
@@ -228,6 +229,43 @@ tapmaker-local-web web \
   --entry scripts/main.lua \
   --no-platform-mock
 ```
+
+## CDP 调试桥
+
+需要让浏览器自动化读取 Canvas 内 UI 语义或触发已声明的本地调试函数时，显式启用：
+
+```bash
+tapmaker-local-web web \
+  --code /path/to/game-content \
+  --entry scripts/main.lua \
+  --debug-bridge
+```
+
+该开关只接受 `127.0.0.1`、`::1` 或 `localhost`，不能与 `--host 0.0.0.0` 一起使用。页面加载后，CDP 可执行 `window.__tapmakerLocal`：
+
+- `snapshot(payload?)`：返回有限大小的 Widget 树与可选游戏状态。
+- `query("#id")`、`query('text="标签"')`、`query("role=button")`：返回语义信息、运行时布局与根布局。
+- `coordinates(selector)`：将查询结果换算为浏览器 viewport 坐标。
+- `click(selector)`：仅调用唯一匹配 Widget 的 `onClick`。
+- `call(name, payload?)`：仅调用游戏显式注册的函数。
+
+桥接通过 Local Web 注入的 Lua 模块和 WASM 内存文件系统传递请求，不修改项目源文件，也不会进入 Maker 构建或 production。游戏如需提供额外状态或动作，只能在本地 BuildInfo 分支显式注册：
+
+```lua
+if BuildInfo.is_local then
+    local debug = rawget(_G, "__tapmaker_local_debug")
+    debug.register("game.inspect", function()
+        return { screen = currentScreen }
+    end)
+    debug.register("game.open_test_scene", function(payload)
+        assert(TEST_SCENES[payload.id], "unknown_test_scene")
+        openTestScene(payload.id)
+        return { accepted = true }
+    end)
+end
+```
+
+不要注册任意 Lua 求值、文件读写、网络请求或未验证的命令转发。返回值必须是 JSON 可序列化的最小数据；`snapshot` 是保留名称，用于为 `snapshot()` 提供额外运行时状态。
 
 ## 热重载
 

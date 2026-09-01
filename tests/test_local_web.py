@@ -10,11 +10,12 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import zlib
 
-from tapmaker_local_web import Workspace
+from tapmaker_local_web import Workspace, WorkspaceError
 from tapmaker_local_web.server import (
     LocalWebProject,
     LocalWebServer,
     current_web_runtime,
+    serve_local_web,
     sync_web_runtime,
 )
 
@@ -82,6 +83,45 @@ target = "assets"
         self.assertIn("function clientCloud:Get(key, events)", content)
         self.assertIn("function clientCloud:Set(key, value, events)", content)
         self.assertIn('require("__tapmaker_project_entry")', content)
+
+    def test_opt_in_debug_bridge_injects_cdp_client_and_lua_protocol(self) -> None:
+        state = LocalWebProject(self.project, debug_bridge=True)
+        files = {item["fs_path"]: item for item in state.manifest()["files"]}
+        wrapper = files["main.lua"]
+        debug = files["__tapmaker_local_debug.lua"]
+        wrapper_name = f"{wrapper['uuid']}-{wrapper['hash']}{wrapper['ext']}"
+        debug_name = f"{debug['uuid']}-{debug['hash']}{debug['ext']}"
+
+        self.assertIn('require("__tapmaker_local_debug")', state.asset(wrapper_name).read().decode())
+        source = state.asset(debug_name).read().decode()
+        self.assertIn("function Debug.register", source)
+        self.assertIn('request.type == "query"', source)
+        self.assertIn('request.type == "call"', source)
+        self.assertIn('file:WriteString(json.encode(value) .. "\\n")', source)
+
+    def test_debug_bridge_rejects_non_loopback_hosts(self) -> None:
+        with self.assertRaises(WorkspaceError):
+            serve_local_web(self.project, host="0.0.0.0", debug_bridge=True)
+
+    def test_debug_client_is_served_only_when_the_bridge_is_enabled(self) -> None:
+        ordinary = LocalWebServer(("127.0.0.1", 0), self.state)
+        debug = LocalWebServer(("127.0.0.1", 0), LocalWebProject(self.project, debug_bridge=True))
+        ordinary_thread = threading.Thread(target=ordinary.serve_forever, daemon=True)
+        debug_thread = threading.Thread(target=debug.serve_forever, daemon=True)
+        ordinary_thread.start()
+        debug_thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{ordinary.server_port}/") as response:
+                self.assertNotIn(b"__tapmakerLocal", response.read())
+            with urlopen(f"http://127.0.0.1:{debug.server_port}/") as response:
+                self.assertIn(b"globalThis.__tapmakerLocal", response.read())
+        finally:
+            ordinary.shutdown()
+            ordinary.server_close()
+            ordinary_thread.join(timeout=2)
+            debug.shutdown()
+            debug.server_close()
+            debug_thread.join(timeout=2)
 
     def test_platform_mock_can_be_disabled_for_runtime_diagnostics(self) -> None:
         state = LocalWebProject(self.project, platform_mock=False)

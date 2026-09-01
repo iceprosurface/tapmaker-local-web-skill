@@ -32,6 +32,8 @@ LOCAL_CLIENT = "local"
 LOCAL_ENGINE = "stable"
 RUNTIME_FILES = ("UrhoXRuntime.js", "UrhoXRuntime.wasm", "UrhoXRuntime.data")
 LOCAL_PROJECT_ENTRY = "__tapmaker_project_entry.lua"
+LOCAL_DEBUG_MODULE = "__tapmaker_local_debug"
+LOCAL_DEBUG_DIRECTORY = "tapmaker-local-debug"
 LOCAL_USER_ID = 900000001
 DYNAMIC_CACHE_CONTROL = "no-store"
 RUNTIME_CACHE_CONTROL = "private, no-cache"
@@ -190,6 +192,144 @@ def _read_json_url(url: str) -> dict[str, object]:
         raise WorkspaceError(f"Web Runtime 返回的不是 JSON 对象：{url}")
     return value
 
+LOCAL_DEBUG_CLIENT_SCRIPT = r'''
+(() => {
+  const directoryName = "tapmaker-local-debug";
+  let directory = null;
+  let sequence = 0;
+  let queue = Promise.resolve();
+  const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+  function fileSystem() {
+    const fs = globalThis.Module && globalThis.Module.FS;
+    if (!fs) throw new Error("local_debug_runtime_not_ready");
+    return fs;
+  }
+
+  function isDirectory(stat) {
+    return (stat.mode & 0o170000) === 0o040000;
+  }
+
+  function locateDirectory(fs) {
+    if (directory) return directory;
+    try {
+      const updateRoot = "/home/web_user/update";
+      for (const origin of fs.readdir(updateRoot)) {
+        if (origin === "." || origin === "..") continue;
+        const savedata = `${updateRoot}/${origin}/savedata`;
+        for (const profile of fs.readdir(savedata)) {
+          if (profile === "." || profile === "..") continue;
+          const candidate = `${savedata}/${profile}/${directoryName}`;
+          if (isDirectory(fs.stat(candidate))) {
+            directory = candidate;
+            return directory;
+          }
+        }
+      }
+    } catch (_) {
+    }
+    const pending = ["/"];
+    const visited = new Set();
+    while (pending.length && visited.size < 2048) {
+      const current = pending.shift();
+      if (visited.has(current)) continue;
+      visited.add(current);
+      let names;
+      try { names = fs.readdir(current); } catch (_) { continue; }
+      for (const name of names) {
+        if (name === "." || name === "..") continue;
+        const path = current === "/" ? `/${name}` : `${current}/${name}`;
+        let stat;
+        try { stat = fs.stat(path); } catch (_) { continue; }
+        if (!isDirectory(stat)) continue;
+        if (name === directoryName) {
+          directory = path;
+          return directory;
+        }
+        pending.push(path);
+      }
+    }
+    return null;
+  }
+
+  function readJson(fs, path) {
+    try {
+      const lines = fs.readFile(path, { encoding: "utf8" }).trimEnd().split("\n");
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        try { return JSON.parse(lines[index]); } catch (_) {}
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  async function ready(timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const fs = fileSystem();
+      const root = locateDirectory(fs);
+      const state = root && readJson(fs, `${root}/state.json`);
+      if (state && state.protocol === 1 && state.ready === true) return state;
+      await sleep(25);
+    }
+    throw new Error("local_debug_bridge_not_ready");
+  }
+
+  async function performRequest(type, payload, timeout) {
+    await ready(timeout);
+    const fs = fileSystem();
+    const root = locateDirectory(fs);
+    if (!root) throw new Error("local_debug_bridge_not_ready");
+    const requestId = `${Date.now()}-${++sequence}`;
+    fs.writeFile(`${root}/request.json`, JSON.stringify({ protocol: 1, request_id: requestId, type, payload }) + "\n");
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const response = readJson(fs, `${root}/response.json`);
+      if (response && response.request_id === requestId) {
+        if (!response.ok) throw new Error(response.error || "local_debug_request_failed");
+        return response.result;
+      }
+      await sleep(25);
+    }
+    throw new Error("local_debug_request_timed_out");
+  }
+
+  function request(type, payload = {}, timeout = 5000) {
+    const result = queue.then(() => performRequest(type, payload, timeout));
+    queue = result.catch(() => {});
+    return result;
+  }
+
+  function viewportBounds(item, root) {
+    if (!item || !item.bounds || !root || !root.width || !root.height) return null;
+    const canvas = document.getElementById("canvas");
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / root.width;
+    const scaleY = rect.height / root.height;
+    return {
+      x: rect.left + (item.bounds.x - root.x) * scaleX,
+      y: rect.top + (item.bounds.y - root.y) * scaleY,
+      width: item.bounds.width * scaleX,
+      height: item.bounds.height * scaleY,
+    };
+  }
+
+  globalThis.__tapmakerLocal = Object.freeze({
+    ready,
+    request,
+    snapshot: payload => request("snapshot", payload),
+    query: selector => request("query", { selector }),
+    click: selector => request("click", { selector }),
+    call: (name, payload) => request("call", { name, payload }),
+    async coordinates(selector) {
+      const result = await request("query", { selector });
+      return result.matches.map(item => ({ ...item, viewport: viewportBounds(item, result.root) }));
+    },
+  });
+})();
+'''
+
+
 INDEX_HTML = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -291,10 +431,16 @@ INDEX_HTML = f"""<!doctype html>
       }});
     }})();
   </script>
+  <!-- tapmaker-local-debug -->
   <script src="{PLAYER_SCRIPT_URL}"></script>
 </body>
 </html>
 """.encode("utf-8")
+
+
+def _index_html(debug_bridge: bool) -> bytes:
+    script = f"<script>{LOCAL_DEBUG_CLIENT_SCRIPT}</script>" if debug_bridge else ""
+    return INDEX_HTML.replace(b"<!-- tapmaker-local-debug -->", script.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -351,10 +497,12 @@ class LocalWebProject:
         deployment: str | None = None,
         *,
         platform_mock: bool = True,
+        debug_bridge: bool = False,
     ):
         self.project = project
         self.deployment = project.deployment(deployment)
         self.platform_mock = platform_mock
+        self.debug_bridge = debug_bridge
         self._lock = threading.RLock()
         self._cache: dict[str, _CachedAsset] = {}
         self._assets: dict[str, AssetRecord] = {}
@@ -525,10 +673,17 @@ class LocalWebProject:
                 self._source_signature(settings_source),
             )
 
-        if self.platform_mock:
+        if self.debug_bridge:
+            debug_path = f"{LOCAL_DEBUG_MODULE}.lua"
+            if debug_path in candidates:
+                raise WorkspaceError(f"本地调试模块的源码别名与项目资源冲突：{debug_path}")
+            debug = self._local_debug_bridge_source()
+            candidates[debug_path] = (None, debug, ("generated-local-debug", debug))
+
+        if self.platform_mock or self.debug_bridge:
             if LOCAL_PROJECT_ENTRY in candidates:
                 raise WorkspaceError(
-                    f"本地平台 mock 的源码别名与项目资源冲突：{LOCAL_PROJECT_ENTRY}"
+                    f"本地入口包装的源码别名与项目资源冲突：{LOCAL_PROJECT_ENTRY}"
                 )
             matching = [
                 virtual
@@ -537,7 +692,7 @@ class LocalWebProject:
             ]
             if len(matching) != 1:
                 raise WorkspaceError(
-                    f"无法唯一定位本地平台 mock 的 Lua 入口：{self.deployment.entry}"
+                    f"无法唯一定位本地入口包装的 Lua 入口：{self.deployment.entry}"
                 )
             virtual = matching[0]
             source, original_content, signature = candidates[virtual]
@@ -551,11 +706,11 @@ class LocalWebProject:
                 content,
                 ("generated-project-entry", content, signature),
             )
-            wrapper = self._platform_mock_source()
+            wrapper = self._entry_wrapper_source()
             candidates[virtual] = (
                 source,
                 wrapper,
-                ("generated-platform-mock", wrapper, signature),
+                ("generated-local-entry", wrapper, signature),
             )
 
         return _CandidateCollection(
@@ -662,39 +817,242 @@ class LocalWebProject:
             },
         }
 
-    def _platform_mock_source(self) -> bytes:
+    def _entry_wrapper_source(self) -> bytes:
         entry = self.deployment.entry
         if not entry.endswith(".lua"):
-            raise WorkspaceError(f"本地平台 mock 只支持 Lua 入口：{entry}")
+            raise WorkspaceError(f"本地入口包装只支持 Lua 入口：{entry}")
         module = LOCAL_PROJECT_ENTRY.removesuffix(".lua")
-        source = f'''-- Generated by tapmaker web. This file is never written to the project.
-local localUserId = {LOCAL_USER_ID}
+        lines = ["-- Generated by tapmaker web. This file is never written to the project."]
+        if self.debug_bridge:
+            lines.extend((f'local localDebug = require("{LOCAL_DEBUG_MODULE}")', "localDebug.start()"))
+        if self.platform_mock:
+            lines.extend(
+                (
+                    f"local localUserId = {LOCAL_USER_ID}",
+                    "",
+                    "lobby = {}",
+                    "function lobby.GetMyUserId()",
+                    "    return localUserId",
+                    "end",
+                    "",
+                    "local cloudValues = {}",
+                    "clientCloud = {}",
+                    "function clientCloud:Get(key, events)",
+                    "    if events and events.ok then events.ok({ [key] = cloudValues[key] }, {}) end",
+                    "end",
+                    "function clientCloud:Set(key, value, events)",
+                    "    cloudValues[key] = value",
+                    "    if events and events.ok then events.ok() end",
+                    "end",
+                    "",
+                    "function GetUserNickname(options)",
+                    "    if options and options.onSuccess then",
+                    '        options.onSuccess({ { userId = localUserId, nickname = "本地测试玩家" } })',
+                    "    end",
+                    "end",
+                    "",
+                    'print("[tapmaker-local] platform mock user_id=" .. tostring(localUserId))',
+                )
+            )
+        lines.append(f'require("{module}")')
+        lines.append("")
+        source = "\n".join(lines)
+        return source.encode("utf-8")
 
-lobby = {{}}
-function lobby.GetMyUserId()
-    return localUserId
+    @staticmethod
+    def _local_debug_bridge_source() -> bytes:
+        source = '''-- Generated by tapmaker web. This file is never written to the project.
+local Debug = {}
+local ROOT = "@@ROOT@@"
+local POLL_INTERVAL = 0.05
+local handlers = {}
+local started = false
+local elapsed = 0
+local lastRequestId = nil
+local json = assert(rawget(_G, "cjson"), "cjson is required for local debug")
+local uiOk, UI = pcall(require, "urhox-libs/UI")
+
+local function writeJson(name, value)
+    if not fileSystem or not File then return false end
+    fileSystem:CreateDir(ROOT)
+    local path = ROOT .. "/" .. name
+    local file = File(path, FILE_WRITE)
+    if not file or not file:IsOpen() then return false end
+    file:WriteString(json.encode(value) .. "\\n")
+    file:Close()
+    return true
 end
 
-local cloudValues = {{}}
-clientCloud = {{}}
-function clientCloud:Get(key, events)
-    if events and events.ok then events.ok({{ [key] = cloudValues[key] }}, {{}}) end
-end
-function clientCloud:Set(key, value, events)
-    cloudValues[key] = value
-    if events and events.ok then events.ok() end
+local function readJson(name)
+    if not fileSystem or not File then return nil end
+    local file = File(ROOT .. "/" .. name, FILE_READ)
+    if not file or not file:IsOpen() then return nil end
+    local content = file:ReadString()
+    file:Close()
+    local latest = nil
+    for line in content:gmatch("[^\\r\\n]+") do
+        local ok, value = pcall(json.decode, line)
+        if ok and type(value) == "table" then latest = value end
+    end
+    return latest
 end
 
-function GetUserNickname(options)
-    if options and options.onSuccess then
-        options.onSuccess({{ {{ userId = localUserId, nickname = "本地测试玩家" }} }})
+local function bounds(widget)
+    local ok, layout = pcall(function()
+        if widget.GetAbsoluteLayoutForHitTest then return widget:GetAbsoluteLayoutForHitTest() end
+        return widget:GetAbsoluteLayout()
+    end)
+    if not ok or type(layout) ~= "table" then return nil end
+    return { x = layout.x, y = layout.y, width = layout.w, height = layout.h }
+end
+
+local function describe(widget)
+    local props = widget.props or {}
+    return {
+        id = props.id or widget.id,
+        role = tostring(widget._className or "Widget"):lower(),
+        text = type(props.text) == "string" and props.text or nil,
+        visible = props.visible ~= false,
+        enabled = props.disabled ~= true,
+        bounds = bounds(widget),
+    }
+end
+
+local function visit(widget, callback)
+    callback(widget)
+    for _, child in ipairs(widget.children or {}) do visit(child, callback) end
+end
+
+local function tree(widget, remaining)
+    if remaining.count <= 0 then return nil end
+    remaining.count = remaining.count - 1
+    local result = describe(widget)
+    result.children = {}
+    for _, child in ipairs(widget.children or {}) do
+        local childResult = tree(child, remaining)
+        if childResult then result.children[#result.children + 1] = childResult end
+    end
+    return result
+end
+
+local function rootWidget()
+    if not uiOk or not UI.GetRoot then return nil end
+    return UI.GetRoot()
+end
+
+local function matches(selector)
+    local root = rootWidget()
+    if not root then return {}, nil end
+    local result = {}
+    local id = selector:match("^#(.+)$")
+    local text = selector:match('^text="(.*)"$')
+    local role = selector:match("^role=([%w_%-]+)$")
+    if id and UI.FindById then
+        local widget = UI.FindById(id)
+        if widget then result[#result + 1] = widget end
+    elseif text or role then
+        visit(root, function(widget)
+            local item = describe(widget)
+            if (text and item.text == text) or (role and item.role == role) then
+                result[#result + 1] = widget
+            end
+        end)
+    end
+    return result, root
+end
+
+local function query(selector)
+    assert(type(selector) == "string" and selector ~= "", "selector_is_required")
+    local widgets, root = matches(selector)
+    local rootBounds = root and bounds(root) or nil
+    local items = {}
+    for _, widget in ipairs(widgets) do
+        local item = describe(widget)
+        if item.bounds then item.bounds.root = rootBounds end
+        items[#items + 1] = item
+    end
+    return { matches = items, root = rootBounds }
+end
+
+local function snapshot(payload)
+    local root = rootWidget()
+    local result = {
+        ui_available = root ~= nil,
+        ui = root and tree(root, { count = tonumber(payload and payload.max_nodes) or 500 }) or nil,
+    }
+    if handlers.snapshot then result.runtime = handlers.snapshot(payload or {}) end
+    return result
+end
+
+local function click(selector)
+    local widgets = matches(selector)
+    assert(#widgets == 1, "selector_must_match_exactly_one_widget")
+    local widget = widgets[1]
+    local onClick = widget.props and widget.props.onClick
+    assert(type(onClick) == "function", "widget_is_not_clickable")
+    onClick(widget)
+    return { widget = describe(widget) }
+end
+
+local function call(name, payload)
+    local handler = handlers[name]
+    assert(type(handler) == "function", "debug_function_is_not_registered")
+    return handler(payload or {})
+end
+
+local function respond(request)
+    local ok, result = pcall(function()
+        if request.type == "snapshot" then return snapshot(request.payload)
+        elseif request.type == "query" then return query(request.payload and request.payload.selector)
+        elseif request.type == "click" then return click(request.payload and request.payload.selector)
+        elseif request.type == "call" then return call(request.payload and request.payload.name, request.payload and request.payload.payload)
+        end
+        error("unknown_debug_request")
+    end)
+    local response = { protocol = 1, request_id = request.request_id, ok = ok }
+    if ok then response.result = result else response.error = tostring(result) end
+    writeJson("response.json", response)
+end
+
+local function poll(dt)
+    elapsed = elapsed + (tonumber(dt) or POLL_INTERVAL)
+    if elapsed < POLL_INTERVAL then return end
+    elapsed = 0
+    local request = readJson("request.json")
+    if request and request.request_id and request.request_id ~= lastRequestId then
+        lastRequestId = request.request_id
+        respond(request)
     end
 end
 
-print("[tapmaker-local] platform mock user_id=" .. tostring(localUserId))
-require("{module}")
+function Debug.register(name, handler)
+    assert(type(name) == "string" and name ~= "", "debug function name is required")
+    assert(type(handler) == "function", "debug function handler is required")
+    handlers[name] = handler
+end
+
+function Debug.start()
+    if started then return end
+    started = true
+    writeJson("state.json", { protocol = 1, ready = true })
+    if uiOk and UI.Update then
+        local projectUpdate = UI.Update
+        UI.Update = function(dt)
+            projectUpdate(dt)
+            poll(dt)
+        end
+    else
+        rawset(_G, "__tapmaker_local_debug_update", function(eventType, eventData)
+            poll(eventData:GetFloat("TimeStep"))
+        end)
+        SubscribeToEvent("Update", "__tapmaker_local_debug_update")
+    end
+end
+
+rawset(_G, "__tapmaker_local_debug", Debug)
+return Debug
 '''
-        return source.encode("utf-8")
+        return source.replace("@@ROOT@@", LOCAL_DEBUG_DIRECTORY).encode("utf-8")
 
     def _project_info(self) -> dict[str, object]:
         cache = self.deployment.cache
@@ -724,6 +1082,7 @@ class LocalWebServer(ThreadingHTTPServer):
         self.state = state
         self.runtime_dir = runtime_dir
         self.runtime_etags = _runtime_etags(runtime_dir)
+        self.index_html = _index_html(state.debug_bridge)
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         super().__init__(address, _LocalWebHandler)
@@ -871,7 +1230,7 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         try:
             if path == "/":
-                self._send(200, INDEX_HTML, "text/html; charset=utf-8", head_only)
+                self._send(200, self.server.index_html, "text/html; charset=utf-8", head_only)
                 return
             if path == "/__tapmaker/revision":
                 self._send_json({"revision": self.server.state.build}, head_only)
@@ -1059,8 +1418,16 @@ def serve_local_web(
     runtime: str = "auto",
     runtime_cache: Path | None = None,
     platform_mock: bool = True,
+    debug_bridge: bool = False,
 ) -> None:
-    state = LocalWebProject(project, deployment, platform_mock=platform_mock)
+    if debug_bridge and host not in {"127.0.0.1", "::1", "localhost"}:
+        raise WorkspaceError("本地调试桥仅允许监听 loopback host")
+    state = LocalWebProject(
+        project,
+        deployment,
+        platform_mock=platform_mock,
+        debug_bridge=debug_bridge,
+    )
     runtime_dir = None if runtime == "remote" else current_web_runtime(runtime_cache)
     if runtime == "local" and runtime_dir is None:
         raise WorkspaceError("尚未同步 Web Runtime；请先运行 bin/tapmaker web-runtime sync")
@@ -1074,6 +1441,8 @@ def serve_local_web(
     print("源码变化后页面会自动重新加载；按 Ctrl-C 停止。")
     print(f"Runtime={'本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN'}")
     print(f"平台能力={'本地 mock' if platform_mock else 'Runtime 原始能力'}")
+    if debug_bridge:
+        print("调试桥已启用：CDP 可调用 window.__tapmakerLocal")
     if open_browser:
         webbrowser.open(server.url)
     try:
