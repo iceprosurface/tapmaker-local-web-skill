@@ -6,12 +6,12 @@ import sys
 import tomllib
 
 from .config import WorkspaceError, direct_project
-from .server import (
+from .runtime import (
     current_web_runtime,
-    serve_local_web,
     sync_web_runtime,
     web_runtime_cache_root,
 )
+from .server import serve_local_web
 
 
 def parser() -> argparse.ArgumentParser:
@@ -30,6 +30,16 @@ def parser() -> argparse.ArgumentParser:
     web.add_argument("--runtime", choices=("auto", "local", "remote"), default="auto")
     web.add_argument("--runtime-cache", type=Path)
     web.add_argument("--no-platform-mock", action="store_true")
+    web.add_argument(
+        "--inspect",
+        action="store_true",
+        help="编译期注入 Lua 调试桥，供页面和外部工具读取组件树",
+    )
+    web.add_argument(
+        "--workbench",
+        action="store_true",
+        help="启动无 React 的 TSCN 左右工作台原型（自动启用组件树桥）",
+    )
     web.add_argument(
         "--orientation",
         choices=("landscape", "portrait"),
@@ -68,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             runtime_cache=args.runtime_cache,
             platform_mock=not args.no_platform_mock,
             orientation=args.orientation,
+            inspector=args.inspect or args.workbench,
+            workbench=args.workbench,
         )
         return 0
     except (WorkspaceError, KeyError, OSError, tomllib.TOMLDecodeError) as error:

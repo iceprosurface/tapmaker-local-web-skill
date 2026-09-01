@@ -90,6 +90,21 @@ target = "assets"
         paths = {item["fs_path"] for item in state.manifest()["files"]}
         self.assertNotIn("__tapmaker_project_entry.lua", paths)
 
+    def test_inspector_compiles_lua_component_tree_bridge_into_entry(self) -> None:
+        state = LocalWebProject(self.project, platform_mock=False, inspector=True)
+        files = {item["fs_path"]: item for item in state.manifest()["files"]}
+        wrapper = files["main.lua"]
+        asset_name = f"{wrapper['uuid']}-{wrapper['hash']}{wrapper['ext']}"
+        content = state.asset(asset_name).read().decode("utf-8")
+
+        self.assertIn('require("urhox-libs/UI")', content)
+        self.assertIn("__TAPMAKER_COMPONENT_TREE__", content)
+        self.assertIn("__tapmakerOriginalSetRoot", content)
+        self.assertNotIn("UI_INSPECTOR_ENABLED", content)
+        self.assertNotIn("__tapmakerUI.Inspector.Init", content)
+        self.assertIn("__tapmakerMaxComponents = 10000", content)
+        self.assertIn('require("__tapmaker_project_entry")', content)
+
     def test_refresh_changes_revision_and_asset_url_after_source_change(self) -> None:
         before = {item["fs_path"]: item for item in self.state.manifest()["files"]}
         revision = self.state.revision
@@ -223,10 +238,64 @@ target = "assets"
                 page = response.read()
             self.assertIn(b"new EventSource('/__tapmaker/events')", page)
             self.assertIn(b".join('\\n')", page)
+            self.assertIn(b"@tailwindcss/browser@4", page)
             with urlopen(f"{base}/__tapmaker/status") as response:
                 status = json.load(response)
             self.assertEqual(status["diagnostics"]["missing_meta"], ["hero.png"])
             self.assertEqual(status["diagnostics"]["missing_meta_count"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_component_tree_endpoint_returns_warning_prompt_then_reported_tree(self) -> None:
+        state = LocalWebProject(self.project, inspector=True)
+        server = LocalWebServer(("127.0.0.1", 0), state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        tree = {
+            "root": {"id": 1, "type": "Panel", "props": {}, "children": []},
+            "component_count": 1,
+        }
+        try:
+            with urlopen(f"{base}/__tapmaker/component-tree") as response:
+                missing = json.load(response)
+            self.assertIsNone(missing["root"])
+            self.assertIn("warning", missing)
+            self.assertIn("agent_prompt", missing)
+
+            request = Request(
+                f"{base}/__tapmaker/component-tree",
+                data=json.dumps(tree).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request) as response:
+                self.assertEqual(json.load(response), {"ok": True})
+            with urlopen(f"{base}/__tapmaker/component-tree") as response:
+                self.assertEqual(json.load(response), tree)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_workbench_prototype_embeds_maker_and_protocol_variants(self) -> None:
+        state = LocalWebProject(self.project, inspector=True)
+        server = LocalWebServer(("127.0.0.1", 0), state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base}/__tapmaker/prototype/workbench?variant=B") as response:
+                page = response.read()
+
+            self.assertIn(b"TSCN Workbench Prototype", page)
+            self.assertIn(b"workbench_session=stage-main", page)
+            self.assertIn(b"tscn-workbench", page)
+            self.assertIn(b"runtime.reload", page)
+            self.assertIn(b"TileMap", page)
+            self.assertIn("/__tapmaker/prototype/workbench?variant=A", server.workbench_url)
         finally:
             server.shutdown()
             server.server_close()

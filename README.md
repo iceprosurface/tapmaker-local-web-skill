@@ -131,6 +131,8 @@ tapmaker-local-web web \
 | `--runtime auto\|local\|remote` | `auto` | 选择 Runtime 来源 |
 | `--runtime-cache` | 用户缓存 | 覆盖 Runtime 缓存目录 |
 | `--no-platform-mock` | 关闭 | 禁用本地账号、昵称和云值 mock |
+| `--inspect` | 关闭 | 编译期注入 Lua 调试桥，启用页面组件树 |
+| `--workbench` | 关闭 | 打开无 React 的 TSCN Workbench MVP，并自动启用调试桥 |
 | `--orientation landscape\|portrait` | `landscape` | 设置 Player 方向和 Canvas 比例 |
 
 `--entry` 必须：
@@ -143,6 +145,26 @@ tapmaker-local-web web \
 竖屏项目使用 `--orientation portrait`。预览 URL 会传递
 `screen_orientation=portrait`，页面 Canvas 同时按 `390:844` 缩放；默认横屏按
 `844:390` 缩放。
+
+### TSCN Workbench MVP
+
+```bash
+tapmaker-local-web web \
+  --code /absolute/path/to/game-content \
+  --entry scripts/main.lua \
+  --workbench
+```
+
+`--workbench` 使用原生 HTML/CSS/JS 组成左侧 Dock 与右侧主工作区，真实 Maker Runtime
+通过 iframe 作为一个独立 session 挂载。工作台与 session 之间使用带 `protocol`、
+`version` 和 `sessionId` 的 `postMessage` 通讯。当前提供运行时与 TileMap 占位页；同一
+路由可用 `?variant=A|B|C` 切换经典双 Dock、紧凑导航、检查器优先三种原型。
+
+`--inspect` 和 `--workbench` 只改写内存中的入口编译产物，不会写回项目。
+
+组件树节点按 `类别#id` 显示；没有业务 `props.id` 时使用本次页面会话的数字 id。页面只
+创建已展开层级的 DOM，Lua 上报最多遍历 10000 个组件，超过时返回 `truncated=true`。
+Tailwind browser runtime 只服务于独立调试页壳层，Workbench 原型本身不需要 React 或前端构建。
 
 ### 查看 Runtime
 
@@ -284,6 +306,7 @@ localhost 的 Runtime version 固定为 `local`。变化的是 manifest client�
 | `/__tapmaker/revision` | 热重载 revision |
 | `/__tapmaker/events` | revision SSE 事件流 |
 | `/__tapmaker/status` | revision 与资源诊断 |
+| `/__tapmaker/component-tree` | GET 查询运行时组件树；启用 inspect 时由调试桥 POST 上报 |
 | `/UrhoXRuntime.*` | 本地 Runtime 模式下的核心文件，支持 ETag 重验证 |
 
 动态响应默认使用 `Cache-Control: no-store`。本地 Runtime 三件套使用
@@ -307,6 +330,7 @@ uv run --project skills/tapmaker-local-web/scripts \
 - 隐藏文件与控制目录过滤
 - `.meta` UUID 与 CRC 映射
 - 平台入口包装与禁用 mock
+- 组件树编译期注入、外部 Query、warning 与 Agent 提示词
 - manifest、资源与 CORS HTTP 接口
 - 资源路径穿越拒绝
 - revision 请求不触发文件系统扫描

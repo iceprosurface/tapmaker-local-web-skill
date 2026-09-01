@@ -37,6 +37,11 @@ uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
   --entry "$TAPMAKER_ENTRY" --no-platform-mock --no-open
 
+# TSCN Workbench 左右工作台 MVP
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  web --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --workbench --no-open
+
 # 更换端口
 uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
@@ -66,6 +71,12 @@ Runtime 缓存默认位于：
 向 localhost 重验证，但内容未变化时返回 304 并复用浏览器缓存，不会再次传输大型
 `.wasm`/`.data` 响应。项目资源 URL 包含 UUID 与 CRC，因此使用一年期 immutable
 缓存；HTML、manifest、revision、status 与 SSE 保持 `no-store`。
+
+启用 `--inspect` 后，入口在内存中编译为“调试桥 + 原项目入口”。调试桥通过 Runtime
+真实 widget 的 `_className`、`props` 与 `children` 生成精简树。外部工具可 GET
+`/__tapmaker/component-tree`。`--workbench` 会自动启用桥，并通过带 `protocol`、`version`、
+`sessionId` 的同源 `postMessage` 协议绑定 Maker iframe。尚未上报时仍返回
+JSON，其中包含 `warning` 和 `agent_prompt`，不使用空响应隐藏适配问题。
 
 ## 诊断顺序
 
