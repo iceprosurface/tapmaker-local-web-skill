@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import zlib
 
 from tapmaker_local_web import Workspace
@@ -114,7 +115,7 @@ target = "assets"
         self.assertEqual(state.latest()["version"], before["version"])
         self.assertNotEqual(state.latest()["client"], before["client"])
 
-    def test_concurrent_revision_requests_share_one_filesystem_scan(self) -> None:
+    def test_revision_requests_never_scan_the_filesystem(self) -> None:
         scans = 0
         original = self.state._collect_candidates
 
@@ -124,8 +125,8 @@ target = "assets"
             return original()
 
         self.state._collect_candidates = counted_collect
-        self.state._last_refresh_at = 0
         server = LocalWebServer(("127.0.0.1", 0), self.state)
+        server._start_watcher = lambda: None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -147,11 +148,118 @@ target = "assets"
             for request in requests:
                 request.join(timeout=2)
             self.assertFalse(failures)
+            self.assertEqual(scans, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_watcher_refreshes_once_after_a_source_change(self) -> None:
+        scans = 0
+        original = self.state._collect_candidates
+
+        def counted_collect():
+            nonlocal scans
+            scans += 1
+            return original()
+
+        self.state._collect_candidates = counted_collect
+        server = LocalWebServer(("127.0.0.1", 0), self.state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        source = self.root / "apps/demo/scripts/main.lua"
+        try:
+            # Let the native watcher consume any setup events that predate its
+            # subscription, then measure only the edit below.
+            time.sleep(0.3)
+            scans = 0
+            revision = self.state.revision
+            source.write_text("return false\n", encoding="utf-8")
+            deadline = time.monotonic() + 3
+            while self.state.revision == revision and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertGreater(self.state.revision, revision)
+            time.sleep(0.3)
             self.assertEqual(scans, 1)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_event_stream_publishes_the_new_revision(self) -> None:
+        server = LocalWebServer(("127.0.0.1", 0), self.state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        events = urlopen(f"{base}/__tapmaker/events", timeout=3)
+        try:
+            self.assertEqual(events.headers["Content-Type"], "text/event-stream; charset=utf-8")
+            self.assertEqual(events.readline(), b"event: revision\n")
+            initial = json.loads(events.readline().removeprefix(b"data: "))["revision"]
+            self.assertEqual(events.readline(), b"\n")
+
+            time.sleep(0.2)
+            (self.root / "apps/demo/scripts/main.lua").write_text(
+                "return false\n", encoding="utf-8"
+            )
+            self.assertEqual(events.readline(), b"event: revision\n")
+            changed = json.loads(events.readline().removeprefix(b"data: "))["revision"]
+            self.assertGreater(changed, initial)
+        finally:
+            events.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_missing_meta_files_are_reported_by_status_endpoint(self) -> None:
+        self.assertEqual(self.state.diagnostics()["missing_meta"], ["hero.png"])
+
+        server = LocalWebServer(("127.0.0.1", 0), self.state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base}/") as response:
+                page = response.read()
+            self.assertIn(b"new EventSource('/__tapmaker/events')", page)
+            self.assertIn(b".join('\\n')", page)
+            with urlopen(f"{base}/__tapmaker/status") as response:
+                status = json.load(response)
+            self.assertEqual(status["diagnostics"]["missing_meta"], ["hero.png"])
+            self.assertEqual(status["diagnostics"]["missing_meta_count"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_portrait_orientation_updates_player_url_and_canvas_ratio(self) -> None:
+        server = LocalWebServer(("127.0.0.1", 0), self.state, orientation="portrait")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertIn("screen_orientation=portrait", server.url)
+            with urlopen(f"http://127.0.0.1:{server.server_port}/") as response:
+                page = response.read()
+            self.assertIn(b"--tapmaker-viewport-width: 390", page)
+            self.assertIn(b"--tapmaker-viewport-height: 844", page)
+            self.assertIn(
+                b"100vh * var(--tapmaker-viewport-width) / var(--tapmaker-viewport-height)",
+                page,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_adding_meta_clears_the_diagnostic_and_changes_revision(self) -> None:
+        revision = self.state.revision
+        (self.root / "apps/demo/assets/hero.png.meta").write_text(
+            '{"uuid":"hero-id"}\n', encoding="utf-8"
+        )
+
+        self.assertTrue(self.state.refresh())
+        self.assertGreater(self.state.revision, revision)
+        self.assertEqual(self.state.diagnostics()["missing_meta"], [])
 
     def test_refresh_ignores_operating_system_metadata_in_layered_mounts(self) -> None:
         (self.root / "apps/demo/scripts/.DS_Store").write_bytes(b"scripts metadata")
@@ -181,6 +289,19 @@ target = "assets"
             asset_name = f"{main['uuid']}-{main['hash']}{main['ext']}"
             with urlopen(f"{base}/assets/{asset_name}") as response:
                 self.assertEqual(response.read(), b"return true\n")
+                self.assertEqual(
+                    response.headers["Cache-Control"], "public, max-age=31536000, immutable"
+                )
+                asset_etag = response.headers["ETag"]
+            self.assertEqual(asset_etag, f'"asset-{main["hash"]}"')
+            with self.assertRaises(HTTPError) as not_modified:
+                urlopen(
+                    Request(
+                        f"{base}/assets/{asset_name}",
+                        headers={"If-None-Match": asset_etag},
+                    )
+                )
+            self.assertEqual(not_modified.exception.code, 304)
             with self.assertRaises(HTTPError) as missing:
                 urlopen(f"{base}/assets/../tapmaker.toml")
             self.assertEqual(missing.exception.code, 404)
@@ -249,9 +370,17 @@ target = "assets"
         try:
             self.assertIn("local_engine=true", server.url)
             self.assertIn("screen_orientation=landscape", server.url)
-            with urlopen(f"http://127.0.0.1:{server.server_port}/UrhoXRuntime.wasm") as response:
+            runtime_url = f"http://127.0.0.1:{server.server_port}/UrhoXRuntime.wasm"
+            with urlopen(runtime_url) as response:
                 self.assertEqual(response.headers["Content-Type"], "application/wasm")
+                self.assertEqual(response.headers["Cache-Control"], "private, no-cache")
+                runtime_etag = response.headers["ETag"]
                 self.assertEqual(response.read(), b"runtime wasm")
+            expected_hash = f"{zlib.crc32(contents['UrhoXRuntime.wasm']) & 0xFFFFFFFF:08x}"
+            self.assertEqual(runtime_etag, f'"runtime-{expected_hash}"')
+            with self.assertRaises(HTTPError) as not_modified:
+                urlopen(Request(runtime_url, headers={"If-None-Match": runtime_etag}))
+            self.assertEqual(not_modified.exception.code, 304)
         finally:
             server.shutdown()
             server.server_close()
