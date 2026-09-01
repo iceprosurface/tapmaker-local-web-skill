@@ -17,6 +17,11 @@ uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
   --entry "$TAPMAKER_ENTRY" --no-open
 
+# 竖屏预览：Player 参数和 Canvas 比例都会切换为竖屏
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  web --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --orientation portrait --no-open
+
 # 强制验证本地 Runtime 缓存
 uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \

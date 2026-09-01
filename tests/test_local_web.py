@@ -232,6 +232,25 @@ target = "assets"
             server.server_close()
             thread.join(timeout=2)
 
+    def test_portrait_orientation_updates_player_url_and_canvas_ratio(self) -> None:
+        server = LocalWebServer(("127.0.0.1", 0), self.state, orientation="portrait")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertIn("screen_orientation=portrait", server.url)
+            with urlopen(f"http://127.0.0.1:{server.server_port}/") as response:
+                page = response.read()
+            self.assertIn(b"--tapmaker-viewport-width: 390", page)
+            self.assertIn(b"--tapmaker-viewport-height: 844", page)
+            self.assertIn(
+                b"100vh * var(--tapmaker-viewport-width) / var(--tapmaker-viewport-height)",
+                page,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_adding_meta_clears_the_diagnostic_and_changes_revision(self) -> None:
         revision = self.state.revision
         (self.root / "apps/demo/assets/hero.png.meta").write_text(

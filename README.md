@@ -131,6 +131,7 @@ tapmaker-local-web web \
 | `--runtime auto\|local\|remote` | `auto` | 选择 Runtime 来源 |
 | `--runtime-cache` | 用户缓存 | 覆盖 Runtime 缓存目录 |
 | `--no-platform-mock` | 关闭 | 禁用本地账号、昵称和云值 mock |
+| `--orientation landscape\|portrait` | `landscape` | 设置 Player 方向和 Canvas 比例 |
 
 `--entry` 必须：
 
@@ -138,6 +139,10 @@ tapmaker-local-web web \
 - 位于 `--code` 目录内
 - 指向实际存在的文件
 - 不包含 `..`
+
+竖屏项目使用 `--orientation portrait`。预览 URL 会传递
+`screen_orientation=portrait`，页面 Canvas 同时按 `390:844` 缩放；默认横屏按
+`844:390` 缩放。
 
 ### 查看 Runtime
 
