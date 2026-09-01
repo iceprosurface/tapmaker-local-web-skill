@@ -83,7 +83,7 @@ uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web \
 默认会自动打开浏览器，地址通常是：
 
 ```text
-http://127.0.0.1:8765/?skip_login&verbose=true&screen_orientation=landscape&entry=scripts/main.lua
+http://127.0.0.1:8765/?skip_login&verbose=true&screen_orientation=landscape&entry=main.lua
 ```
 
 保存本地脚本或资源后，页面会自动重新加载。按 `Ctrl-C` 停止服务。
@@ -109,6 +109,35 @@ http://127.0.0.1:8765/
 
 demo 只使用公开的 `urhox-libs/UI` 组件和一份普通 JSON 资源，不包含真实游戏内容。页面提供“开始游戏”“+1 加分”和“重置”按钮，可直接验证 UI 渲染、点击响应、状态更新与源码热重载。
 
+这个命令同时模拟 Maker 标准的两个资源根：
+
+```text
+scripts/main.lua  → main.lua
+assets/demo.json  → demo.json
+```
+
+demo 还包含一个只用于本地扩展验收的 `config/local-preview.json`。显式传入三个资源根即可验证三目录合并：
+
+```bash
+uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web \
+  web \
+  --code examples/demo-project/assets \
+  --code examples/demo-project/scripts \
+  --code examples/demo-project/config \
+  --entry scripts/main.lua \
+  --runtime remote \
+  --no-open
+```
+
+此时 `config/local-preview.json` 映射为 `local-preview.json`。三资源根是本地预览扩展，不代表当前 Maker MCP 的远端构建支持。
+
+仓库测试会真正启动以上两种 demo 服务，通过 HTTP 检查 manifest 并下载代表性资源：
+
+```bash
+uv run --project skills/tapmaker-local-web/scripts \
+  python -m unittest tests.test_demo -v
+```
+
 ## CLI
 
 ### 启动预览
@@ -119,12 +148,26 @@ tapmaker-local-web web \
   --entry <相对 Lua 入口>
 ```
 
+项目内容分别位于多个资源根时，可以重复传入 `--code`。命令行中的 `--entry` 可以相对于这些目录的共同父目录，也可以直接写相对于唯一资源根的 `main.lua`：
+
+```bash
+tapmaker-local-web web \
+  --code /project/assets \
+  --code /project/scripts \
+  --code /project/config \
+  --entry scripts/main.lua
+```
+
+每个 `--code` 都按 Maker `build.asset_dirs` 的语义成为独立资源根：`scripts/main.lua` 在 manifest 和 Player 中是 `main.lua`，`assets/image/hero.png` 是 `image/hero.png`。未显式传入的同级目录不会被扫描。
+
+只传项目根目录时，会优先读取 `.project/settings.json` 的 `build.asset_dirs`；没有该配置时自动识别常规的 `assets` 和 `scripts`。当前 Maker 官方标准是 `assets + scripts`；第三个及更多 `--code` 属于本地预览扩展兼容，不表示项目能通过当前 Maker MCP 的远端构建检查。
+
 主要选项：
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
-| `--code` | 必填 | 要映射的本地项目根目录 |
-| `--entry` | 必填 | 相对 `--code` 的 Lua 入口 |
+| `--code` | 必填、可重复 | 要映射的本地项目或资源目录 |
+| `--entry` | 必填 | 可相对项目根/共同父目录，或相对唯一资源根；运行时会去掉资源根前缀 |
 | `--host` | `127.0.0.1` | HTTP 监听地址 |
 | `--port` | `8765` | HTTP 监听端口 |
 | `--no-open` | 关闭 | 不自动打开浏览器 |
@@ -195,7 +238,7 @@ uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web \
 启动时，工具会：
 
 1. 规范化并验证 `--code` 和 `--entry`。
-2. 递归扫描本地项目目录。
+2. 按 Maker `build.asset_dirs` 解析一个或多个独立资源根，并递归扫描它们。
 3. 读取 `.meta` 中已有的 UUID；没有 UUID 时生成稳定的本地 UUID。
 4. 计算资源 CRC32 和大小。
 5. 为 Lua、JSON、XML、material、prefab 等启动资源标记 blocking group。
@@ -268,7 +311,7 @@ localhost 的 Runtime version 固定为 `local`。变化的是 manifest client�
 - 自动排除 `.git`、`.project`、`.maker-mcp`、`.env`、其他隐藏路径、`.venv`、`node_modules` 和 `__pycache__`。
 - `.meta` 只用于读取资源 UUID，不作为资源本身发布。
 
-仍然建议把 `--code` 指向最小的游戏内容目录。所有未被过滤的普通文件都可能进入本地 manifest，不要直接指向包含无关文档或秘密明文的宽泛仓库根目录。
+仍然建议把 `--code` 指向项目根或明确的 Maker 资源目录。项目根模式只扫描解析出的资源根；所有资源根中未被过滤的普通文件都可能进入本地 manifest。
 
 使用 `--host 0.0.0.0` 会让同一网络内的其他设备访问服务。该服务没有登录保护并允许跨源资源读取，只应在可信局域网中使用，不能暴露到公网。
 

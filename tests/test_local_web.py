@@ -310,6 +310,22 @@ target = "assets"
             server.server_close()
             thread.join(timeout=2)
 
+    def test_player_errors_expose_a_close_action(self) -> None:
+        server = LocalWebServer(("127.0.0.1", 0), self.state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_port}/") as response:
+                page = response.read().decode("utf-8")
+
+            self.assertIn("installDismissibleErrorDialogs", page)
+            self.assertIn("callbackId === -1 && !cancelText", page)
+            self.assertIn("关闭", page)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_runtime_sync_caches_verified_engine_files_and_serves_them_locally(self) -> None:
         source = self.root / "runtime-source"
         assets = source / "assets"

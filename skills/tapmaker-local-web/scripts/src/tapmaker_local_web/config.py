@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tomllib
+from typing import Sequence
 
 
 CONTROL_NAMES = {".git", ".maker-mcp", ".project"}
@@ -64,19 +65,46 @@ class Project:
         return version
 
 
-def direct_project(code_root: Path, entry: str) -> Project:
-    """根据本地项目目录和入口创建只读预览项目。"""
-    root = code_root.expanduser().resolve()
-    if not root.is_dir():
-        raise WorkspaceError(f"本地项目目录不存在：{root}")
+def direct_project(code_root: Path | Sequence[Path], entry: str) -> Project:
+    """根据一个或多个本地资源目录和入口创建只读预览项目。"""
+    requested_roots = (code_root,) if isinstance(code_root, Path) else tuple(code_root)
+    if not requested_roots:
+        raise WorkspaceError("至少需要一个本地项目目录")
+    requested = tuple(sorted((path.expanduser().resolve() for path in requested_roots), key=str))
+    for directory in requested:
+        if not directory.is_dir():
+            raise WorkspaceError(f"本地项目目录不存在：{directory}")
+    for index, left in enumerate(requested):
+        for right in requested[index + 1 :]:
+            if left == right or left.is_relative_to(right) or right.is_relative_to(left):
+                raise WorkspaceError(f"本地项目目录不能重复或互相包含：{left}、{right}")
+
+    root = requested[0] if len(requested) == 1 else Path(os.path.commonpath(requested))
     entry_path = Path(entry)
     if entry_path.is_absolute() or not entry or ".." in entry_path.parts:
         raise WorkspaceError(f"入口必须是项目目录内的相对路径：{entry}")
-    resolved_entry = (root / entry_path).resolve()
-    if not resolved_entry.is_relative_to(root) or not resolved_entry.is_file():
-        raise WorkspaceError(f"入口文件不存在或越出项目目录：{resolved_entry}")
-    normalized_entry = entry_path.as_posix()
-    namespace_source = f"{root}\0{normalized_entry}".encode("utf-8")
+    roots = _direct_resource_roots(root, requested)
+    entry_candidates = {
+        candidate.resolve()
+        for candidate in (root / entry_path, *(directory / entry_path for directory in roots))
+        if candidate.resolve().is_file()
+        and any(candidate.resolve().is_relative_to(directory) for directory in roots)
+    }
+    if len(entry_candidates) != 1:
+        reason = "存在歧义" if entry_candidates else "不存在或越出已选资源目录"
+        raise WorkspaceError(f"入口文件{reason}：{entry}")
+    resolved_entry = entry_candidates.pop()
+    entry_roots = [
+        code_directory
+        for code_directory in roots
+        if resolved_entry.is_relative_to(code_directory)
+    ]
+    if len(entry_roots) != 1:
+        raise WorkspaceError(f"入口文件无法唯一归属 Maker 资源根：{resolved_entry}")
+    normalized_entry = resolved_entry.relative_to(entry_roots[0]).as_posix()
+    namespace_source = "\0".join(
+        (*[str(code_directory) for code_directory in roots], normalized_entry)
+    ).encode("utf-8")
     local_namespace = f"local-{sha256(namespace_source).hexdigest()[:16]}"
     deployment = Deployment(
         name="local",
@@ -90,11 +118,72 @@ def direct_project(code_root: Path, entry: str) -> Project:
         root=root,
         name=local_namespace,
         entry=normalized_entry,
-        mounts=(Mount(source=root, target=Path("project")),),
+        mounts=tuple(
+            Mount(
+                source=code_directory,
+                target=(
+                    Path("project")
+                    if code_directory == root
+                    else Path(code_directory.name)
+                ),
+            )
+            for code_directory in roots
+        ),
         deployments=(deployment,),
         default_deployment="local",
         version_file=None,
         build_info_target=None,
+    )
+
+
+def _direct_resource_roots(
+    project_root: Path,
+    requested_roots: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    if len(requested_roots) > 1:
+        roots = requested_roots
+    else:
+        configured = _maker_asset_dirs(project_root)
+        conventional = tuple(
+            directory
+            for directory in (project_root / "assets", project_root / "scripts")
+            if directory.is_dir()
+        )
+        roots = configured or conventional or requested_roots
+
+    roots = tuple(sorted(roots, key=str))
+    names: set[str] = set()
+    for index, left in enumerate(roots):
+        if not left.is_dir():
+            raise WorkspaceError(f"Maker 资源目录不存在：{left}")
+        if left != project_root and left.name in names:
+            raise WorkspaceError(f"Maker 资源目录名称重复，无法建立独立资源根：{left.name}")
+        names.add(left.name)
+        for right in roots[index + 1 :]:
+            if left == right or left.is_relative_to(right) or right.is_relative_to(left):
+                raise WorkspaceError(f"Maker 资源目录不能重复或互相包含：{left}、{right}")
+    return roots
+
+
+def _maker_asset_dirs(project_root: Path) -> tuple[Path, ...]:
+    settings_path = project_root / ".project/settings.json"
+    if not settings_path.is_file():
+        return ()
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkspaceError(f"无法读取 Maker 构建配置：{settings_path}") from error
+    build = settings.get("build") if isinstance(settings, dict) else None
+    asset_dirs = build.get("asset_dirs") if isinstance(build, dict) else None
+    if asset_dirs is None:
+        return ()
+    if not isinstance(asset_dirs, list) or not asset_dirs or not all(
+        isinstance(value, str) and value for value in asset_dirs
+    ):
+        raise WorkspaceError(f"Maker build.asset_dirs 无效：{settings_path}")
+    return tuple(
+        _inside(project_root, settings_path.parent / value, "Maker 资源目录")
+        for value in asset_dirs
     )
 
 

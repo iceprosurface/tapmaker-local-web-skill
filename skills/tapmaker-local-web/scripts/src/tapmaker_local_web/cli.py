@@ -22,8 +22,18 @@ def parser() -> argparse.ArgumentParser:
     subcommands = result.add_subparsers(dest="command", required=True)
 
     web = subcommands.add_parser("web", help="启动本地 Web 预览")
-    web.add_argument("--code", type=Path, required=True, help="本地项目根目录")
-    web.add_argument("--entry", required=True, help="相对于 --code 的 Lua 入口路径")
+    web.add_argument(
+        "--code",
+        type=Path,
+        action="append",
+        required=True,
+        help="本地项目或资源目录；多目录时可重复传入",
+    )
+    web.add_argument(
+        "--entry",
+        required=True,
+        help="入口定位路径：可相对项目根/共同父目录，或相对唯一资源根；运行时去掉资源根前缀",
+    )
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
     web.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
