@@ -36,6 +36,10 @@ LOCAL_USER_ID = 900000001
 DYNAMIC_CACHE_CONTROL = "no-store"
 RUNTIME_CACHE_CONTROL = "private, no-cache"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+ORIENTATION_SIZES = {
+    "landscape": (844, 390),
+    "portrait": (390, 844),
+}
 
 BLOCKING_EXTENSIONS = {
     ".lua",
@@ -197,11 +201,17 @@ INDEX_HTML = f"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TapMaker 本地预览</title>
   <style>
+    :root {{
+      --tapmaker-viewport-width: __TAPMAKER_VIEWPORT_WIDTH__;
+      --tapmaker-viewport-height: __TAPMAKER_VIEWPORT_HEIGHT__;
+    }}
     html, body {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: #080808; }}
     #canvas {{
       position: fixed !important; left: 50% !important; top: 50% !important;
-      width: min(844px, 100vw, calc(100vh * 844 / 390)) !important;
-      height: min(390px, 100vh, calc(100vw * 390 / 844)) !important;
+      width: min(calc(var(--tapmaker-viewport-width) * 1px), 100vw,
+        calc(100vh * var(--tapmaker-viewport-width) / var(--tapmaker-viewport-height))) !important;
+      height: min(calc(var(--tapmaker-viewport-height) * 1px), 100vh,
+        calc(100vw * var(--tapmaker-viewport-height) / var(--tapmaker-viewport-width))) !important;
       transform: translate(-50%, -50%) !important;
       border: 0; outline: 0; box-shadow: 0 0 0 1px #282828;
     }}
@@ -295,6 +305,15 @@ INDEX_HTML = f"""<!doctype html>
 </body>
 </html>
 """.encode("utf-8")
+
+
+def _index_html(orientation: str) -> bytes:
+    width, height = ORIENTATION_SIZES[orientation]
+    return INDEX_HTML.replace(
+        b"__TAPMAKER_VIEWPORT_WIDTH__", str(width).encode()
+    ).replace(
+        b"__TAPMAKER_VIEWPORT_HEIGHT__", str(height).encode()
+    )
 
 
 @dataclass(frozen=True)
@@ -720,9 +739,16 @@ class LocalWebServer(ThreadingHTTPServer):
         address: tuple[str, int],
         state: LocalWebProject,
         runtime_dir: Path | None = None,
+        *,
+        orientation: str = "landscape",
     ):
+        if orientation not in ORIENTATION_SIZES:
+            available = ", ".join(ORIENTATION_SIZES)
+            raise WorkspaceError(f"未知预览方向：{orientation}；可用方向：{available}")
         self.state = state
         self.runtime_dir = runtime_dir
+        self.orientation = orientation
+        self.index_html = _index_html(orientation)
         self.runtime_etags = _runtime_etags(runtime_dir)
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
@@ -732,7 +758,7 @@ class LocalWebServer(ThreadingHTTPServer):
     def url(self) -> str:
         host, port = self.server_address[:2]
         display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-        query = "skip_login&verbose=true&screen_orientation=landscape"
+        query = f"skip_login&verbose=true&screen_orientation={self.orientation}"
         query += f"&entry={quote(self.state.deployment.entry, safe='/')}"
         if self.runtime_dir is not None:
             query += "&local_engine=true"
@@ -871,7 +897,7 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         try:
             if path == "/":
-                self._send(200, INDEX_HTML, "text/html; charset=utf-8", head_only)
+                self._send(200, self.server.index_html, "text/html; charset=utf-8", head_only)
                 return
             if path == "/__tapmaker/revision":
                 self._send_json({"revision": self.server.state.build}, head_only)
@@ -1059,12 +1085,13 @@ def serve_local_web(
     runtime: str = "auto",
     runtime_cache: Path | None = None,
     platform_mock: bool = True,
+    orientation: str = "landscape",
 ) -> None:
     state = LocalWebProject(project, deployment, platform_mock=platform_mock)
     runtime_dir = None if runtime == "remote" else current_web_runtime(runtime_cache)
     if runtime == "local" and runtime_dir is None:
         raise WorkspaceError("尚未同步 Web Runtime；请先运行 bin/tapmaker web-runtime sync")
-    server = LocalWebServer((host, port), state, runtime_dir)
+    server = LocalWebServer((host, port), state, runtime_dir, orientation=orientation)
     print(f"TapMaker 本地 Web 预览：{server.url}")
     print(
         f"项目={project.name} target={state.deployment.name} entry={state.deployment.entry} "
@@ -1074,6 +1101,8 @@ def serve_local_web(
     print("源码变化后页面会自动重新加载；按 Ctrl-C 停止。")
     print(f"Runtime={'本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN'}")
     print(f"平台能力={'本地 mock' if platform_mock else 'Runtime 原始能力'}")
+    width, height = ORIENTATION_SIZES[orientation]
+    print(f"预览方向={orientation} ({width}x{height})")
     if open_browser:
         webbrowser.open(server.url)
     try:
