@@ -214,6 +214,23 @@ INDEX_HTML = f"""<!doctype html>
     }})();
   </script>
   <script src="{PLAYER_SCRIPT_URL}"></script>
+  <script>
+    (() => {{
+      function installDismissibleErrorDialogs() {{
+        if (!window.UrhoX || typeof window.UrhoX.showDialog !== 'function') return false;
+        const showDialog = window.UrhoX.showDialog;
+        window.UrhoX.showDialog = function(title, message, confirmText, cancelText, callbackId) {{
+          const dismissText = callbackId === -1 && !cancelText ? '关闭' : cancelText;
+          return showDialog.call(this, title, message, confirmText, dismissText, callbackId);
+        }};
+        return true;
+      }}
+
+      if (!installDismissibleErrorDialogs()) {{
+        window.addEventListener('DOMContentLoaded', installDismissibleErrorDialogs, {{ once: true }});
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """.encode("utf-8")
@@ -413,7 +430,9 @@ class LocalWebProject:
                 },
                 "build": {
                     "generate_fs_path": True,
-                    "asset_dirs": ["../assets", "../scripts"],
+                    "asset_dirs": [
+                        f"../{mount.target.as_posix()}" for mount in self.project.mounts
+                    ],
                     "asset_ignores": [],
                 },
                 "@runtime": {},

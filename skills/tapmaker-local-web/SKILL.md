@@ -9,11 +9,11 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 
 ## 执行流程
 
-1. 取得两个必需输入：本地项目根目录绝对路径、相对于该目录的 Lua `entry`。不读取或要求真实 Maker project id。
-2. 确认本地项目目录属于用户放入任务范围的有效 worktree。读取该目录适用的 `AGENTS.md`；不读取该目录之外的其他项目、部署缓存或凭据。
+1. 取得两个必需输入：一个项目根目录，或多个明确的 Maker 资源根绝对路径；以及用于定位文件的 Lua `entry`（可相对于项目根/共同父目录，或相对于唯一资源根）。Maker manifest 中的 entry 则相对于入口所在的资源根，例如本地 `scripts/main.lua` 对应 `main.lua`。不读取或要求真实 Maker project id。
+2. 确认每个本地目录属于用户放入任务范围的有效 worktree。读取这些目录适用的 `AGENTS.md`；不读取未明确挂载的同级目录、其他项目、部署缓存或凭据。
 3. 将包含本 `SKILL.md` 的目录解析为 Skill 根绝对路径。下文 `<skill-dir>` 和 `<code-dir>` 必须替换为实际绝对路径。
 4. 运行 `uv run --project <skill-dir>/scripts tapmaker-local-web web-runtime status`。未同步时执行对应的 `web-runtime sync`；这只更新用户级 Runtime 缓存，不访问 Maker 项目。
-5. 用可持续会话启动 `uv run --project <skill-dir>/scripts tapmaker-local-web web --code <code-dir> --entry <entry> --no-open`。保留服务器输出中的实际 URL；不要猜测端口或吞掉启动错误。
+5. 用可持续会话启动 `uv run --project <skill-dir>/scripts tapmaker-local-web web --code <code-dir> --entry <entry> --no-open`。单项目根模式优先使用 `.project/settings.json` 的 `build.asset_dirs`，缺失时识别常规 `assets`/`scripts`。项目分散在多个资源根时，为每个目录重复传入 `--code <code-dir>`，并让命令行 `--entry` 相对于它们的共同父目录；服务端会按 Maker 行为把它转换为相对于入口资源根的路径。保留服务器输出中的实际 URL；不要猜测端口或吞掉启动错误。
 6. 需要功能验收时，用可用的浏览器自动化打开该 URL。默认按手机横屏 CSS viewport `844 × 390` 验收；只在任务涉及其他尺寸时切换并汇报。
 7. 至少确认项目入口已执行、目标功能可见或可操作、本次涉及的代表性资源实际加载，且浏览器与引擎日志没有相关 `ERROR`。修改一个任务内文件后，确认页面能在 revision 变化后自动重载。
 8. 验收后停止服务器，除非用户明确要求保持运行。最终回报 entry、URL、Runtime 模式、验收结果和是否已停止；不在公开回报中暴露本机绝对路径。
@@ -23,6 +23,7 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 - `--runtime auto` 是默认值：优先本地 Runtime，无缓存时使用 CDN。只在验证本地缓存时用 `local`，在差分 Runtime 缓存问题时用 `remote`。
 - 默认的平台 mock 提供本地用户 `900000001`、昵称与内存云值。它只是游戏侧契约替身，不代表真实登录或云存档。普通本地测试不禁用；只在排查 Runtime 原始行为时使用 `--no-platform-mock`。
 - Runtime 同步只本地化 `UrhoXRuntime.js`、`UrhoXRuntime.wasm` 和 `UrhoXRuntime.data`。Player 外壳、engine-res、official-res 仍可能访问 CDN；不得宣称完全离线。
+- 当前 Maker 官方标准资源根是 `assets + scripts`。三个及更多显式 `--code` 仅是本地预览扩展兼容，不得据此宣称当前 Maker MCP 远端构建支持三资源根。
 - 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 Maker test 发布流程；未经授权不得触发远程构建。
 - 将 host 绑定为 `0.0.0.0` 会把无登录保护、允许跨源读取的项目服务暴露给局域网。只在用户要求其他设备访问且网络可信时使用。
 

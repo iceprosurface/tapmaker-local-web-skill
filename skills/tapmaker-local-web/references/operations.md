@@ -17,6 +17,13 @@ uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
   --entry "$TAPMAKER_ENTRY" --no-open
 
+# 多 Maker 资源根：entry 用共同父目录定位，manifest 中转换为资源根相对路径
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  web --code /path/to/project/assets \
+  --code /path/to/project/scripts \
+  --code /path/to/project/config \
+  --entry scripts/main.lua --no-open
+
 # 强制验证本地 Runtime 缓存
 uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
@@ -47,7 +54,7 @@ Runtime 缓存默认位于：
 
 ## 运行机制
 
-`LocalWebProject` 将 `--code` 目录映射为一个只读本地资源树，使用 `.meta` UUID、文件 CRC32 和大小构造 Maker 兼容 manifest。`.meta` 不作为资源发布；`.git`、`.project`、`.maker-mcp`、`.env`、`.venv`、`node_modules`、系统元数据和其他隐藏路径不进入 manifest。
+`LocalWebProject` 将一个或多个 `--code` 目录映射为 Maker 独立资源根，使用 `.meta` UUID、文件 CRC32 和大小构造 Maker 兼容 manifest。路径相对于各自资源根生成：`scripts/main.lua` 映射为 `main.lua`，`assets/image/hero.png` 映射为 `image/hero.png`。单项目根模式优先读取 `.project/settings.json` 的 `build.asset_dirs`，缺失时识别常规 `assets`/`scripts`；未选中的同级目录不会被扫描。`.meta` 不作为资源发布；`.git`、`.project`、`.maker-mcp`、`.env`、`.venv`、`node_modules`、系统元数据和其他隐藏路径不进入 manifest。
 
 浏览器每秒读取 `/__tapmaker/revision`。文件签名变化后，服务端复用未变资源的已有记录，更新 manifest client 并触发整页重载。localhost version 固定为 `local`，与 `version.toml` 无关；不要通过递增它来规避旧 manifest，否则会破坏稳定的 OPFS 资源缓存命名空间。
 
@@ -63,7 +70,9 @@ Runtime 缓存默认位于：
 
 ### Lua 入口无效
 
-`--entry` 必须是相对于 `--code` 的现有文件，不能为绝对路径、包含 `..` 或越出项目目录。可以用 `--no-platform-mock` 做 Runtime 原始行为的最小差分诊断，但它不能修复错误的 entry。
+命令行 `--entry` 可相对于项目根/多目录共同父目录，也可相对于唯一资源根；文件必须唯一命中其中一个已选根。服务端写入 manifest 和 Player URL 时会转换为入口资源根相对路径，例如 `scripts/main.lua` 转换为 `main.lua`，与 Maker 的 `scriptsPath="scripts"`、`entry="main.lua"` 行为一致。入口不能为绝对路径、包含 `..` 或越出已选目录。可以用 `--no-platform-mock` 做 Runtime 原始行为的最小差分诊断，但它不能修复错误的 entry。
+
+当前 Maker 官方健康检查只承认标准的 `../assets` 与 `../scripts`。三个及更多资源根是本地预览扩展，用于兼容和排查现有目录布局，不代表当前 Maker MCP 能远端构建该配置。
 
 ### 修改后没有重载
 
