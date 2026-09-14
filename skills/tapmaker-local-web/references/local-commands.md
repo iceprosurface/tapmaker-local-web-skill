@@ -58,17 +58,3 @@ CDP 对既有 target 使用 `Runtime.evaluate`，参数示例：
 当前官方 Web Runtime 的文件映射为 `/home/web_user/update/<host冒号替换为下划线>/savedata/0/saves/`，Lua 使用 `saves/`。这里的 `0` 是 Runtime 路径约定，不是平台 mock 用户 ID。升级 Runtime 后需验证这个映射；路径变化会使桥无法就绪。
 
 这是一条开发调试通道，不是身份认证机制；同页面脚本也可调用白名单。生产包必须不含生成模块、JS bootstrap 或 WebMCP 注册。不要把本地 mock 验收当成真实平台验收。
-
-## 实测与复现
-
-仓库 `examples/demo-project` 已接入 `query/start/add_score/reset`，复用 UI 按钮的同一组应用操作。在单独端口启动该示例，并在启用 CDP 的隔离浏览器中打开一次页面后运行：
-
-```bash
-CDP_URL=http://127.0.0.1:9359 PAGE_URL=http://127.0.0.1:8875/ node tests/browser_bridge_smoke.cjs
-```
-
-脚本会修改示例得分，仅用于独立 Demo；复用既有 target，不打开新页面。可设 `SCREENSHOT_PATH` 保存 20 分时的截图。它验证初始查询、开始、20 次并发请求串行执行、非法命令拒绝及重置。
-
-2026-09-14 在本地 Runtime `1.31.5-03435566`、无头 Chrome、844×390 下通过真实 Web Player 验收；20 次调用约 854ms，仅是该环境的观测值，不是性能保证。截图得分与查询一致。没有 Lua/JavaScript 异常，页面 favicon 请求返回 404。WebMCP 宿主发现/调用需在支持它的客户端另行验收，本次通过 CDP 验证 JS→Lua→UI。
-
-实测修复：当前 Runtime 的 `FS.writeFile` 对已有邮箱不会按预期替换内容，发送前必须 `FS.truncate(path, 0)`；仅模拟标准文件覆盖行为的单元测试无法发现这个兼容问题。
