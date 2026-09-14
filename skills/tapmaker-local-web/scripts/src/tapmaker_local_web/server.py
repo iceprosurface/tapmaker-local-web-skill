@@ -301,6 +301,7 @@ INDEX_HTML = f"""<!doctype html>
       }});
     }})();
   </script>
+  <script>{Path(__file__).with_name("local_command.js").read_text(encoding="utf-8")}</script>
   <script src="{PLAYER_SCRIPT_URL}"></script>
   <script>
     (() => {{
@@ -595,6 +596,15 @@ class LocalWebProject:
                 wrapper,
                 ("generated-platform-mock", wrapper, signature),
             )
+
+        generated = {
+            "__tapmaker_local_build_info.lua": b"return {is_local = true}\n",
+            "__tapmaker_local_bridge.lua": Path(__file__).with_name("local_bridge.lua").read_bytes(),
+        }
+        for name, content in generated.items():
+            if any(self._filesystem_path(virtual) == name for virtual in candidates):
+                raise WorkspaceError(f"本地命令桥保留资源名冲突：{name}")
+            candidates[name] = (None, content, ("generated-local-bridge", content))
 
         return _CandidateCollection(
             files=tuple(

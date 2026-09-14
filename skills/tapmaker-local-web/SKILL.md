@@ -24,7 +24,11 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 - 默认的平台 mock 提供本地用户 `900000001`、昵称与内存云值。它只是游戏侧契约替身，不代表真实登录或云存档。普通本地测试不禁用；只在排查 Runtime 原始行为时使用 `--no-platform-mock`。
 - Runtime 同步只本地化 `UrhoXRuntime.js`、`UrhoXRuntime.wasm` 和 `UrhoXRuntime.data`。Player 外壳、engine-res、official-res 仍可能访问 CDN；不得宣称完全离线。
 - 当前 Maker 官方标准资源根是 `assets + scripts`。三个及更多显式 `--code` 仅是本地预览扩展兼容，不得据此宣称当前 Maker MCP 远端构建支持三资源根。
-- 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 Maker test 发布流程；未经授权不得触发远程构建。
+- 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 项目规定的远程发布流程；未经授权不得触发远程构建。
 - 将 host 绑定为 `0.0.0.0` 会把无登录保护、允许跨源读取的项目服务暴露给局域网。只在用户要求其他设备访问且网络可信时使用。
 
 启动参数、资源诊断或常见错误需要更多细节时，读取 [操作与排错](references/operations.md)。
+
+## 语义动作验收
+
+应用有 dispatcher 时，优先使用 `window.tapmakerLocal.call` 或可选的 WebMCP `tapmaker_local_command` 执行动作和查询，避免用坐标点击代替业务断言。首次接入、CDP 调用和超时处理先读 [本地命令桥](references/local-commands.md)。复用既有浏览器 target，不为每次调用重新打开页面。

@@ -432,3 +432,9 @@ tapmaker-local-web web \
 ## 来源与许可
 
 许可证：[MIT](LICENSE)
+
+## 本地语义命令桥
+
+支持 `window.tapmakerLocal.call` 与可选 WebMCP `tapmaker_local_command`，经内存文件系统调用应用显式白名单的 Lua dispatcher。包含就绪等待、串行调用、响应配对与超时保护。接入方式、CDP 示例和运行边界见 [本地命令桥](skills/tapmaker-local-web/references/local-commands.md)。
+
+协议测试：`node --test tests/local_command.test.cjs`；领域示例：`luajit examples/local-command-demo.lua`。
