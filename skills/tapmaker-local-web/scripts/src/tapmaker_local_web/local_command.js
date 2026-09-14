@@ -37,6 +37,8 @@
         if (!acknowledged) throw Error('previous_command_pending');
         outstanding = null;
       }
+      // 当前 WasmFS 的 writeFile 不覆盖已有文件，先清空已注册的邮箱。
+      Module.FS.truncate(prefix + 'request.json', 0);
       Module.FS.writeFile(prefix + 'request.json', envelope);
       outstanding = request.id;
       const deadline = Date.now() + duration;

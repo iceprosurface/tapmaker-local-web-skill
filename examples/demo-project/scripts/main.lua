@@ -1,6 +1,11 @@
 local UI = require("urhox-libs/UI")
 
 local uiRoot_ = nil
+local bridgePoll_ = nil
+
+function DemoLocalUpdate()
+    if bridgePoll_ then bridgePoll_() end
+end
 local gameStarted_ = false
 local score_ = 0
 
@@ -165,10 +170,25 @@ function Start()
 
     uiRoot_ = createInterface()
     UI.SetRoot(uiRoot_)
+    -- UI 按钮与桥接命令复用上面的应用操作；生产不含生成模块。
+    local isLocal, build = pcall(require, "__tapmaker_local_build_info")
+    if isLocal and build.is_local == true then
+        bridgePoll_ = require("__tapmaker_local_bridge").register(build,
+            {query = true, start = true, add_score = true, reset = true},
+            function(command)
+                if command.type == "start" then startGame()
+                elseif command.type == "add_score" then addScore()
+                elseif command.type == "reset" then resetGame() end
+                return {started = gameStarted_, score = score_}
+            end)
+        SubscribeToEvent("Update", "DemoLocalUpdate")
+    end
     print("[tapmaker-local-web-demo] interface ready")
 end
 
 function Stop()
+    bridgePoll_ = nil
+    UnsubscribeFromEvent("Update")
     UI.Shutdown()
     uiRoot_ = nil
 end
