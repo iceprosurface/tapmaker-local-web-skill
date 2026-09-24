@@ -16,7 +16,7 @@ TapMaker 项目的本地 UrhoX Web 预览器，同时也是一个可安装的 Ag
 > npx -y -p @taptap/maker taptap-maker console open --target-dir /absolute/path/to/project
 > ```
 >
-> 官方方案使用原生 UrhoX Runtime，更接近真实运行环境，并支持联机项目连接官方测试服。新用户建议直接使用官方工具；本项目转入维护状态，仅保留「浏览器中的 Web Player 预览」这一补充场景，差异见[下文](#与官方本地预览的差异)。
+> 官方方案使用原生 UrhoX Runtime，更接近真实运行环境，并支持联机项目连接官方测试服。新用户建议优先使用官方工具；本项目继续聚焦浏览器 Web Player 场景，并对齐官方 `preview` 工作流与联机测试服直连（见[下文](#复刻官方-preview-工作流实验性)）。
 
 > [!IMPORTANT]
 > **免责声明：**本项目是由社区开发者独立维护的非官方开源工具，仅供软件开发、技术研究、学习交流和本地调试使用。本项目与 TapTap、TapMaker 及其运营方、关联公司之间不存在隶属、授权、合作、赞助、认可或背书关系，也不代表 TapTap 或 TapMaker 官方立场。项目中出现的 TapTap、TapMaker、UrhoX 等名称及相关商标、产品标识和服务归其各自权利人所有。使用者应自行遵守适用的服务条款、开发者协议、软件许可和法律法规，并自行承担使用本项目产生的风险与责任。本项目按“现状”提供，不对可用性、兼容性、数据安全或特定用途作任何明示或默示保证，不建议将其作为正式发布、生产部署或官方验收依据。
@@ -44,16 +44,69 @@ TapMaker Local Web 保留官方 UrhoX Web Player 和 Runtime，只把项目来�
 
 ## 与官方本地预览的差异
 
-日常开发、联机调试和贴近真机的验收，建议直接使用官方 `taptap-maker preview` 与本地控制台。本项目保留的价值集中在「浏览器里的官方 Web Player」，适合无法安装本机 Runtime、或需要保存即自动重载的纯浏览器工作流：
+日常开发和贴近真机的验收建议直接使用官方 `taptap-maker preview`。本项目保留的价值集中在「浏览器里的官方 Web Player」，适合无法安装本机 Runtime、或需要保存即自动重载的纯浏览器工作流：
 
-| | 官方 `taptap-maker preview` / 控制台 | TapMaker Local Web |
+| | 官方 `taptap-maker preview` | TapMaker Local Web |
 | --- | --- | --- |
-| 形态 | 本机原生 UrhoX Runtime 窗口 + 本地控制台网页 | 浏览器中的官方 Web Player |
+| 形态 | 本机原生 UrhoX Runtime 窗口 | 浏览器中的官方 Web Player |
 | 项目来源 | 优先直读项目原目录，必要时走受管理副本 | 本地 manifest 与 `/assets/...` 接口 |
-| 联机项目 | 可连官方测试服 | 不支持，平台能力为本地 mock |
-| 改动反馈 | `preview refresh` 手动重启 | 文件保存后自动整页重载 |
+| 会话管理 | `preview start/status/stop` | 同名动词：`preview start --detached/status/stop` |
+| 运行观测 | Runtime 日志、`preview logs/check` | 页面上报日志、里程碑与错误计数，`preview logs/check` |
+| 截图 | `preview screenshot` | 同名动词，经 SSE 命令让页面回传 canvas PNG |
+| 联机项目 | 可连官方测试服 | 同样支持：自动申请测试游戏并经 `directConnectParams` 直连 |
+| 改动反馈 | `preview refresh` 手动重启 | `preview refresh` 重载 + 保存后自动整页重载 |
 | 依赖 | 本机 Runtime（`~/.taptap-maker/runtime/`） | Python 3.11+ 与 uv，可选本地 Runtime 缓存 |
-| 维护 | 官方持续迭代 | 维护状态，优先保证既有工作流兼容 |
+| 维护 | 官方持续迭代 | 社区维护，优先保证既有工作流兼容 |
+
+## 复刻官方 preview 工作流（实验性）
+
+对齐官方 `taptap-maker preview` 的动词，把浏览器页当作预览窗口：
+
+```bash
+# 后台启动会话（--port 0 自动分配端口）
+tapmaker-local-web preview start \
+  --code /absolute/path/to/game-content \
+  --entry scripts/main.lua --detached --no-open --port 0
+
+# 管理动词（与 start 相同的 --code/--entry 定位会话）
+tapmaker-local-web preview status    # 会话与健康检查
+tapmaker-local-web preview refresh   # 通知页面整页重载
+tapmaker-local-web preview logs --follow   # 页面上报的运行日志
+tapmaker-local-web preview screenshot --out shot.png  # 页面 canvas 截图
+tapmaker-local-web preview check     # 启动里程碑、错误计数与诊断汇总
+tapmaker-local-web preview stop      # 停止会话
+```
+
+同时提供 `--size WxH` 视口预设（100–4096，对应官方控制台的窗口尺寸）。
+
+实现要点：
+
+- 预览页在 Player 脚本前注入控制脚本：包装 console、捕获 window 错误、上报里程碑，并为 WebGL
+  上下文补 `preserveDrawingBuffer`，使 canvas 可随时截屏。
+- 截图与重载通过 `/__tapmaker/events` 的 SSE `command` 事件下发，页面回传 PNG 后由 CLI 落盘；
+  没有已连接页面时截图返回 409。
+- 所有写操作（refresh/shutdown/screenshot/上报）要求 `X-TapMaker-Control` 令牌（存于会话
+  `session.json` 并嵌入页面），loopback 绑定时同时校验 `Host` 头，防止跨站页面伪造本地请求。
+- 会话状态写入用户缓存目录（macOS：`~/Library/Caches/TapMaker/local-web/<项目命名空间>/`），
+  可用 `TAPMAKER_LOCAL_WEB_STATE_ROOT` 覆盖。
+
+### 联机测试服直连
+
+检测到联机/server 项目（`@runtime.multiplayer`、`@runtime.max_players`、`entry@server`、
+`scripts/server_main.lua`/`server.lua`）时，启动会自动复刻官方鉴权与申请链路：
+
+1. 复用官方 `taptap-maker login` 的本地 PAT（`~/.taptap-maker/pat.json`，或 `MAKER_PAT` 环境变量）
+2. 用 PAT 换取测试服登录凭据（`maker.taptap.cn/api/v1/user/taptap-token` → `kid`/`mac_key`）
+3. 连接官方入口 `wss://entrance-new-pd.spark.xd.com`，按 CreateMultiDebugGame 契约申请 `test` 标签测试游戏
+4. 将 `{userId, connectInfo: {pod_ip, ws_port}}` 编码为 `directConnectParams` 追加到预览 URL，官方 Web Player 直接进入直连模式（联机模式下自动禁用本地平台 mock）
+
+要求与限制：
+
+- 需要项目已提交构建；测试版本依次取 `dist/latest.json`、`.project/project.json` 的 `version`，可用 `--project-version` 覆盖
+- 服务端运行远端已构建版本；本地 server 代码修改需提交构建后才生效（客户端改动仍走本地热重载）
+- `--multiplayer off` 可跳过测试服，按单机预览
+- 会话期间 `preview refresh` 复用同一测试游戏；重启会话（stop 后 start）才申请新游戏
+- PAT 与凭据只存在官方本地存储与本进程内存，不进入日志、URL 或会话记录
 
 ## 一键安装 Agent Skill
 
@@ -346,14 +399,20 @@ localhost 的 Runtime version 固定为 `local`。变化的是 manifest client�
 
 | 路径 | 用途 |
 | --- | --- |
-| `/` | 官方 Player 外壳 |
+| `/` | 官方 Player 外壳（含控制脚本注入） |
 | `/latest.json` | 本地 Runtime 版本信息 |
 | `/project.json` | 本地项目协议信息 |
 | `/local/manifest-<client>.json` | 当前资源 manifest |
 | `/assets/...` | 按需读取本地资源 |
 | `/__tapmaker/revision` | 热重载 revision |
-| `/__tapmaker/events` | revision SSE 事件流 |
+| `/__tapmaker/events` | revision 与 command 的 SSE 事件流 |
 | `/__tapmaker/status` | revision 与资源诊断 |
+| `/__tapmaker/health` | 会话存活与项目标识 |
+| `/__tapmaker/check` | 启动里程碑、错误计数、诊断汇总 |
+| `/__tapmaker/logs` | 页面上报日志尾部 |
+| `/__tapmaker/screenshot(.png)` | 最近一次截图状态与 PNG 数据 |
+| `POST /__tapmaker/control/refresh\|shutdown\|screenshot` | 会话控制（需令牌） |
+| `POST /__tapmaker/report/logs\|milestone\|screenshot` | 页面上报（需令牌） |
 | `/UrhoXRuntime.*` | 本地 Runtime 模式下的核心文件，支持 ETag 重验证 |
 
 动态响应默认使用 `Cache-Control: no-store`。本地 Runtime 三件套使用
@@ -385,6 +444,10 @@ uv run --project skills/tapmaker-local-web/scripts \
 - 文件修改后的 revision 与资源 URL 更新
 - Runtime 下载、校验、缓存和 WASM Content-Type
 - Runtime ETag/304 重验证与内容寻址资源长期缓存
+- 控制面令牌鉴权、Host 校验与请求体限制
+- 日志环形缓冲、里程碑与截图上报校验
+- preview 会话后台启动、status/refresh/logs/screenshot/check/stop 全生命周期
+- 预览页控制脚本的注入与渲染
 
 验证 Skill 结构：
 

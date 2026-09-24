@@ -29,6 +29,11 @@ uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
   --entry "$TAPMAKER_ENTRY" --orientation portrait --no-open
 
+# 自定义视口尺寸（100-4096），对应官方控制台的窗口预设
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  web --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --size 1260x540 --no-open
+
 # 强制验证本地 Runtime 缓存
 uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
@@ -56,6 +61,63 @@ Runtime 缓存默认位于：
 - 其他系统：`$XDG_CACHE_HOME/tapmaker/web-runtime`，未设置时使用 `~/.cache/tapmaker/web-runtime`
 
 可用 `TAPMAKER_WEB_RUNTIME_CACHE` 或命令的 `--cache`/`--runtime-cache` 覆盖。`sync`、`status` 和 `web` 必须指向同一个自定义缓存。
+
+## preview 会话与联机测试服
+
+`preview` 命令组复刻官方 `taptap-maker preview` 的工作流（页面即预览窗口）：
+
+```bash
+# 后台启动（会话记录写入用户缓存目录，合 --port 0 自动分配端口）
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  preview start --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --detached --no-open --port 0
+
+# 管理动词（需要与 start 相同的 --code/--entry 来定位会话）
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview status  --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview refresh --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview logs    --code … --entry … --follow
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview screenshot --code … --entry … --out shot.png
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview check   --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview stop    --code … --entry …
+```
+
+- 会话目录默认位于 `~/Library/Caches/TapMaker/local-web/<项目命名空间>/`（其他系统在
+  `$XDG_CACHE_HOME/tapmaker/local-web/`），含 `session.json`、`server.log`、`page.log` 与截图；
+  可用 `TAPMAKER_LOCAL_WEB_STATE_ROOT` 覆盖。
+- 预览页会把 console/window 错误与里程碑上报到服务端：`check` 汇总 `entry_served`、
+  `connected_pages`、错误计数与诊断；`started=false` 时 `reasons` 说明缺口。
+- 截图通过 SSE 命令请求页面回传 canvas PNG；没有人打开过预览页时返回 409。
+- 所有写操作（refresh/shutdown/screenshot/上报）需 `X-TapMaker-Control` 令牌；令牌存在
+  `session.json` 并嵌入页面。loopback 绑定时同时校验 `Host` 头。
+- `preview logs` 只包含页面上报的日志环形缓冲（默认 2000 行）；服务端启动输出在
+  `server.log`。
+
+排错：
+
+- `preview status` 报 `process_exited` 但记录仍在：上次进程异常退出未清理，直接重新 `preview start` 覆盖即可。
+- POST 返回 403：令牌不匹配（会话是旧进程启动的）或 Host 校验失败；重新启动会话。
+- 截图 409：先用浏览器打开预览 URL 再截图。
+- `stop` 超时：先看 `server.log`；必要时 `stop --force`。
+
+### 联机测试服直连
+
+检测到联机/server 项目时，`preview start`/`web` 会自动：读取官方 `taptap-maker login` 的
+PAT（`~/.taptap-maker/pat.json`，或 `MAKER_PAT`/`PAT` 环境变量，或 `--pat`）→ 换取
+`kid`/`mac_key` → 连接 `wss://entrance-new-pd.spark.xd.com` 申请 `test` 标签测试游戏 → 把
+`directConnectParams` 追加到预览 URL。联机模式自动禁用本地平台 mock。
+
+排错：
+
+- 未找到 PAT：先运行 `taptap-maker login`。
+- `测试服登录失败（code）`：PAT 失效，重新 `taptap-maker login`。
+- `测试服创建失败（code）`：项目尚未提交构建，或 `--project-version` 与已构建测试版本不一致。
+- `联网预览缺少游戏配置`：项目根缺少 `.project/project.json` 的真实 `project_id`，或仍是
+  `local-preview` 身份；需在已绑定的 Maker 项目中运行。
+- 版本解析顺序：`--project-version` → `dist/latest.json`（按 `build.output_dir` 定位）→
+  `.project/project.json` 的 `version`。
+- 服务端运行远端已构建版本：本地 server 代码改动需提交构建后才生效；客户端改动仍本地热重载。
+- 会话期间 `preview refresh` 复用同一测试游戏；重启会话才申请新游戏。
+- 单机调试：`--multiplayer off`。
 
 ## 运行机制
 
