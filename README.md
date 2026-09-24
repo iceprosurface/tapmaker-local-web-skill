@@ -4,12 +4,26 @@ TapMaker 项目的本地 UrhoX Web 预览器，同时也是一个可安装的 Ag
 
 它直接把本地项目目录转换成官方 Web Player 可读取的 manifest 和资源接口，用于快速检查 Lua、UI、图片、音频、材质及其他运行时资源。整个反馈环不需要真实 Maker 项目、不需要 project id、不需要部署缓存，也不会上传本地项目文件或递增发布版本。
 
+> [!NOTE]
+> **官方已支持本地预览，建议优先使用官方工具链。** 截至 2026-09-24，官方 [`@taptap/maker`](https://www.npmjs.com/package/@taptap/maker) CLI（v0.0.34+）已正式提供本地预览与 Maker 本地控制台：
+>
+> ```bash
+> # 官方本地预览：原生 Runtime 窗口直读项目原目录，不提交、不上传、不远端构建
+> npx -y -p @taptap/maker taptap-maker preview install --target-dir /absolute/path/to/project --json
+> npx -y -p @taptap/maker taptap-maker preview start --target-dir /absolute/path/to/project --json
+>
+> # Maker 本地控制台：本机网页工具台，集中本地预览、远端构建、测试二维码与日志
+> npx -y -p @taptap/maker taptap-maker console open --target-dir /absolute/path/to/project
+> ```
+>
+> 官方方案使用原生 UrhoX Runtime，更接近真实运行环境，并支持联机项目连接官方测试服。新用户建议直接使用官方工具；本项目转入维护状态，仅保留「浏览器中的 Web Player 预览」这一补充场景，差异见[下文](#与官方本地预览的差异)。
+
 > [!IMPORTANT]
 > **免责声明：**本项目是由社区开发者独立维护的非官方开源工具，仅供软件开发、技术研究、学习交流和本地调试使用。本项目与 TapTap、TapMaker 及其运营方、关联公司之间不存在隶属、授权、合作、赞助、认可或背书关系，也不代表 TapTap 或 TapMaker 官方立场。项目中出现的 TapTap、TapMaker、UrhoX 等名称及相关商标、产品标识和服务归其各自权利人所有。使用者应自行遵守适用的服务条款、开发者协议、软件许可和法律法规，并自行承担使用本项目产生的风险与责任。本项目按“现状”提供，不对可用性、兼容性、数据安全或特定用途作任何明示或默示保证，不建议将其作为正式发布、生产部署或官方验收依据。
 
 ## 它解决什么问题
 
-远程 Maker 预览适合验证真实平台环境，但日常修改一行 Lua、一张图片或一个材质时，完整的测试、物化、同步和远程构建链路太重。
+本项目立项时，Maker 还只有远程预览：日常修改一行 Lua、一张图片或一个材质，也要走完整的测试、物化、同步和远程构建链路。如今官方 CLI 已内置本地预览（见顶部说明），这个痛点有了官方解法；下文描述本项目保留的浏览器 Web Player 反馈环。
 
 TapMaker Local Web 保留官方 UrhoX Web Player 和 Runtime，只把项目来源替换为 localhost：
 
@@ -27,6 +41,19 @@ TapMaker Local Web 保留官方 UrhoX Web Player 和 Runtime，只把项目来�
 
 - 本地项目根目录，例如 `/path/to/game-content`
 - 相对该目录的 Lua 入口，例如 `scripts/main.lua`
+
+## 与官方本地预览的差异
+
+日常开发、联机调试和贴近真机的验收，建议直接使用官方 `taptap-maker preview` 与本地控制台。本项目保留的价值集中在「浏览器里的官方 Web Player」，适合无法安装本机 Runtime、或需要保存即自动重载的纯浏览器工作流：
+
+| | 官方 `taptap-maker preview` / 控制台 | TapMaker Local Web |
+| --- | --- | --- |
+| 形态 | 本机原生 UrhoX Runtime 窗口 + 本地控制台网页 | 浏览器中的官方 Web Player |
+| 项目来源 | 优先直读项目原目录，必要时走受管理副本 | 本地 manifest 与 `/assets/...` 接口 |
+| 联机项目 | 可连官方测试服 | 不支持，平台能力为本地 mock |
+| 改动反馈 | `preview refresh` 手动重启 | 文件保存后自动整页重载 |
+| 依赖 | 本机 Runtime（`~/.taptap-maker/runtime/`） | Python 3.11+ 与 uv，可选本地 Runtime 缓存 |
+| 维护 | 官方持续迭代 | 维护状态，优先保证既有工作流兼容 |
 
 ## 一键安装 Agent Skill
 
