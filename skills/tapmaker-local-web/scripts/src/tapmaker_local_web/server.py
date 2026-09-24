@@ -23,6 +23,14 @@ from watchfiles import watch
 from . import session
 from .config import Project, WorkspaceError, _render_build_info
 from .control import ControlError, ControlPlane
+from .multiplayer import (
+    detect_multiplayer,
+    direct_connect_param,
+    load_pat,
+    network_identity,
+    request_tap_auth,
+    request_test_server,
+)
 
 
 ENGINE_BASE_URL = "https://tapcode-sce.spark.xd.com/src/engine/"
@@ -255,10 +263,6 @@ INDEX_HTML = f"""<!doctype html>
       font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
       transform: translateX(-50%); white-space: pre-wrap; }}
     #tapmaker-diagnostics.visible {{ display: block; }}
-    #console-link {{ position: fixed; right: 10px; bottom: 10px; z-index: 12000;
-      padding: 4px 10px; border-radius: 6px; color: #9db8d6; background: rgba(20, 24, 30, .8);
-      font: 12px system-ui, sans-serif; text-decoration: none; }}
-    #console-link:hover {{ color: #cfe3f8; }}
   </style>
 </head>
 <body oncontextmenu="return false">
@@ -274,7 +278,6 @@ INDEX_HTML = f"""<!doctype html>
     <h2 id="dialog-title"></h2><p id="dialog-message"></p>
     <button id="dialog-confirm">重新加载</button><button id="dialog-cancel" class="hidden"></button>
   </div></div>
-  <a id="console-link" href="/console">控制台</a>
   <script>
     (() => {{
       let revision = null;
@@ -438,130 +441,6 @@ _PAGE_CONTROL_JS = """
 
 INDEX_HTML = INDEX_HTML.replace(b"__TAPMAKER_CONTROL_SCRIPT__", _PAGE_CONTROL_JS)
 
-_CONSOLE_HTML = """
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TapMaker Local Web 控制台</title>
-  <meta name="tapmaker-control-token" content="__TAPMAKER_CONTROL_TOKEN__">
-  <style>
-    html, body { margin: 0; background: #0d1117; color: #d6dee6; }
-    body { font: 14px/1.5 system-ui, sans-serif; padding: 16px; }
-    h1 { font-size: 18px; margin: 0 0 12px; color: #e8f0fb; }
-    a { color: #6cb2f5; }
-    section { background: #161b26; border: 1px solid #232b3a; border-radius: 8px;
-      padding: 12px 14px; margin-bottom: 12px; }
-    .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-    .status-grid div { background: #10151f; border-radius: 6px; padding: 8px 10px; }
-    .status-grid .label { color: #8395ad; font-size: 12px; }
-    .status-grid .value { font-size: 15px; margin-top: 2px; }
-    .value.ok { color: #57c98a; } .value.bad { color: #e06c6c; }
-    button { background: #24304a; color: #d6dee6; border: 1px solid #35476b; border-radius: 6px;
-      padding: 6px 14px; margin-right: 8px; cursor: pointer; font: 13px system-ui, sans-serif; }
-    button:hover { background: #2c3b5c; }
-    #logs { max-height: 45vh; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace;
-      background: #0a0e15; border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-all; }
-    #logs .lvl-warn { color: #e3b341; } #logs .lvl-error { color: #e06c6c; }
-    #shot { max-width: 100%; display: none; border: 1px solid #232b3a; border-radius: 6px; }
-    label { color: #8395ad; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <h1>TapMaker Local Web 控制台</h1>
-  <section>
-    <div class="status-grid">
-      <div><div class="label">预览状态</div><div class="value" id="v-started">…</div></div>
-      <div><div class="label">已连接页面</div><div class="value" id="v-pages">…</div></div>
-      <div><div class="label">revision</div><div class="value" id="v-revision">…</div></div>
-      <div><div class="label">错误 / 警告</div><div class="value" id="v-errors">…</div></div>
-      <div><div class="label">缺 .meta</div><div class="value" id="v-meta">…</div></div>
-      <div><div class="label">视口 / Runtime</div><div class="value" id="v-runtime">…</div></div>
-    </div>
-    <p style="margin:10px 0 0"><a id="open-preview" target="_blank" rel="noopener">打开预览页</a></p>
-  </section>
-  <section>
-    <button id="refresh">刷新预览</button>
-    <button id="screenshot">截图</button>
-    <label><input type="checkbox" id="follow" checked> 日志自动滚动</label>
-    <button id="clear">清屏</button>
-  </section>
-  <section><img id="shot" alt=""></section>
-  <section><div id="logs"></div></section>
-  <script>
-    (() => {
-      const token = document.querySelector('meta[name="tapmaker-control-token"]').content;
-      const $ = id => document.getElementById(id);
-
-      function post(path, body) {
-        return fetch(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-TapMaker-Control': token },
-          body: JSON.stringify(body || {}),
-        });
-      }
-      async function pollStatus() {
-        try {
-          const check = await (await fetch('/__tapmaker/check', { cache: 'no-store' })).json();
-          $('open-preview').href = check.url;
-          const started = $('v-started');
-          started.textContent = check.started ? '已启动' : '未启动';
-          started.className = 'value ' + (check.started ? 'ok' : 'bad');
-          $('v-pages').textContent = String(check.connected_pages);
-          $('v-revision').textContent = String(check.revision);
-          $('v-errors').textContent =
-            `${check.log.counts.error} / ${check.log.counts.warn}`;
-          $('v-meta').textContent = String(check.diagnostics.missing_meta_count);
-          $('v-runtime').textContent =
-            `${check.viewport.width}x${check.viewport.height} / ${check.runtime}`;
-        } catch (_) {}
-      }
-      async function pollLogs() {
-        try {
-          const data = await (await fetch('/__tapmaker/logs?lines=300', { cache: 'no-store' })).json();
-          const box = $('logs');
-          box.textContent = '';
-          for (const line of data.lines) {
-            const div = document.createElement('div');
-            div.className = 'lvl-' + line.level;
-            div.textContent = `${line.ts} [${line.level}] ${line.message}`;
-            box.appendChild(div);
-          }
-          if ($('follow').checked) box.scrollTop = box.scrollHeight;
-        } catch (_) {}
-      }
-      $('refresh').onclick = async () => {
-        try { await post('/__tapmaker/control/refresh'); } catch (_) {}
-      };
-      $('screenshot').onclick = async () => {
-        try {
-          const response = await post('/__tapmaker/control/screenshot');
-          if (!response.ok) { alert(await response.text()); return; }
-          const deadline = Date.now() + 20000;
-          const timer = setInterval(async () => {
-            try {
-              const status = await (await fetch('/__tapmaker/screenshot', { cache: 'no-store' })).json();
-              if (status.status === 'ready') {
-                const shot = $('shot');
-                shot.src = '/__tapmaker/screenshot.png?ts=' + Date.now();
-                shot.style.display = 'block';
-                clearInterval(timer);
-              }
-            } catch (_) {}
-            if (Date.now() > deadline) clearInterval(timer);
-          }, 500);
-        } catch (error) { alert('截图失败：' + error); }
-      };
-      $('clear').onclick = () => { $('logs').textContent = ''; };
-
-      pollStatus(); setInterval(pollStatus, 2000);
-      pollLogs(); setInterval(pollLogs, 1000);
-    })();
-  </script>
-</body>
-</html>
-""".encode("utf-8")
 
 
 def _index_html(orientation: str, size: tuple[int, int] | None, token: str) -> bytes:
@@ -571,10 +450,6 @@ def _index_html(orientation: str, size: tuple[int, int] | None, token: str) -> b
         .replace(b"__TAPMAKER_VIEWPORT_HEIGHT__", str(height).encode())
         .replace(b"__TAPMAKER_CONTROL_TOKEN__", token.encode())
     )
-
-
-def _console_html(token: str) -> bytes:
-    return _CONSOLE_HTML.replace(b"__TAPMAKER_CONTROL_TOKEN__", token.encode())
 
 
 @dataclass(frozen=True)
@@ -1013,6 +888,7 @@ class LocalWebServer(ThreadingHTTPServer):
         size: tuple[int, int] | None = None,
         control_token: str | None = None,
         log_path: Path | None = None,
+        direct_connect: dict[str, object] | None = None,
     ):
         if orientation not in ORIENTATION_SIZES:
             available = ", ".join(ORIENTATION_SIZES)
@@ -1021,9 +897,9 @@ class LocalWebServer(ThreadingHTTPServer):
         self.runtime_dir = runtime_dir
         self.orientation = orientation
         self.viewport_size = size or ORIENTATION_SIZES[orientation]
+        self.direct_connect = direct_connect
         self.control = ControlPlane(control_token, log_path=log_path)
         self.index_html = _index_html(orientation, self.viewport_size, self.control.token)
-        self.console_html = _console_html(self.control.token)
         self.runtime_etags = _runtime_etags(runtime_dir)
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
@@ -1035,6 +911,8 @@ class LocalWebServer(ThreadingHTTPServer):
         query += f"&entry={quote(self.state.deployment.entry, safe='/')}"
         if self.runtime_dir is not None:
             query += "&local_engine=true"
+        if self.direct_connect is not None:
+            query += f"&directConnectParams={quote(direct_connect_param(self.direct_connect), safe='')}"
         return f"{self._display_base()}/?{query}"
 
     def _display_base(self) -> str:
@@ -1054,8 +932,8 @@ class LocalWebServer(ThreadingHTTPServer):
             "revision": self.state.build,
             "entry": self.state.deployment.entry,
             "url": self.url,
-            "console_url": f"{self._display_base()}/console",
             "runtime": "local" if self.runtime_dir is not None else "remote",
+            "multiplayer": self.direct_connect is not None,
             "viewport": {"width": self.viewport_size[0], "height": self.viewport_size[1]},
             "diagnostics": self.state.diagnostics(),
             "started": not reasons,
@@ -1307,9 +1185,6 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, data, "image/png", head_only)
                 return
-            if path == "/console":
-                self._send(200, self.server.console_html, "text/html; charset=utf-8", head_only)
-                return
             if path == "/__tapmaker/events" and not head_only:
                 self._send_events()
                 return
@@ -1513,7 +1388,35 @@ def serve_local_web(
     orientation: str = "landscape",
     size: tuple[int, int] | None = None,
     state_root_dir: Path | None = None,
+    multiplayer: str = "auto",
+    project_version: str | None = None,
+    pat: str | None = None,
 ) -> None:
+    direct_connect: dict[str, object] | None = None
+    test_server_info: dict[str, object] | None = None
+    if multiplayer == "auto" and detect_multiplayer(project.workspace_root):
+        identity = network_identity(project.workspace_root, explicit_version=project_version)
+        auth = request_tap_auth(load_pat(pat))
+        direct_connect = request_test_server(identity.project_id, identity.version, auth)
+        connect_info = direct_connect["connectInfo"]
+        assert isinstance(connect_info, dict)
+        test_server_info = {
+            "pod_ip": connect_info["pod_ip"],
+            "ws_port": connect_info["ws_port"],
+            "user_id": direct_connect["userId"],
+            "version": identity.version,
+        }
+        print(
+            f"联机测试服：ws://{connect_info['pod_ip']}:{connect_info['ws_port']}"
+            f"（userId={direct_connect['userId']}，测试版本 {identity.version}）"
+        )
+        print("服务端运行远端已构建版本；本地 server 代码修改需提交构建后才生效。")
+        if platform_mock:
+            platform_mock = False
+            print("已联机直连：本地平台 mock 已禁用。")
+    elif multiplayer != "auto" and multiplayer != "off":
+        raise WorkspaceError(f"未知联机模式：{multiplayer}；可用模式：auto、off")
+
     state = LocalWebProject(project, deployment, platform_mock=platform_mock)
     runtime_dir = None if runtime == "remote" else current_web_runtime(runtime_cache)
     if runtime == "local" and runtime_dir is None:
@@ -1530,6 +1433,7 @@ def serve_local_web(
         orientation=orientation,
         size=size,
         log_path=directory / "page.log" if directory is not None else None,
+        direct_connect=direct_connect,
     )
     record = None
     if directory is not None:
@@ -1539,10 +1443,10 @@ def serve_local_web(
             server.url,
             server.server_port,
             server.control.token,
+            test_server=test_server_info,
         )
         session.write_record(record, root=state_root_dir)
     print(f"TapMaker 本地 Web 预览：{server.url}")
-    print(f"控制台：{server._display_base()}/console")
     print(
         f"项目={project.name} target={state.deployment.name} entry={state.deployment.entry} "
         f"files={len(state.manifest()['files'])}"

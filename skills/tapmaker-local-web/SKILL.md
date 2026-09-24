@@ -13,18 +13,19 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 2. 确认每个本地目录属于用户放入任务范围的有效 worktree。读取这些目录适用的 `AGENTS.md`；不读取未明确挂载的同级目录、其他项目、部署缓存或凭据。
 3. 将包含本 `SKILL.md` 的目录解析为 Skill 根绝对路径。下文 `<skill-dir>` 和 `<code-dir>` 必须替换为实际绝对路径。
 4. 运行 `uv run --project <skill-dir>/scripts tapmaker-local-web web-runtime status`。未同步时执行对应的 `web-runtime sync`；这只更新用户级 Runtime 缓存，不访问 Maker 项目。
-5. 根据项目或用户要求选择方向：横屏使用默认的 `--orientation landscape`，竖屏使用 `--orientation portrait`；无法从任务内项目代码、配置或截图判断时才沿用横屏默认值；需要非默认视口时用 `--size WxH`。单项目根模式优先使用 `.project/settings.json` 的 `build.asset_dirs`，缺失时识别常规 `assets`/`scripts`；项目分散在多个资源根时，为每个目录重复传入 `--code <code-dir>`，并让命令行 `--entry` 相对于它们的共同父目录，服务端会按 Maker 行为转换为相对于入口资源根的路径。用可持续会话启动 `uv run --project <skill-dir>/scripts tapmaker-local-web preview start --code <code-dir> --entry <entry> --orientation <orientation> --detached --no-open --port 0`（前台调试可用 `web` 子命令）。保留服务器输出中的实际 URL 与控制台 `/console` 地址；不要猜测端口或吞掉启动错误。
+5. 根据项目或用户要求选择方向：横屏使用默认的 `--orientation landscape`，竖屏使用 `--orientation portrait`；无法从任务内项目代码、配置或截图判断时才沿用横屏默认值；需要非默认视口时用 `--size WxH`。单项目根模式优先使用 `.project/settings.json` 的 `build.asset_dirs`，缺失时识别常规 `assets`/`scripts`；项目分散在多个资源根时，为每个目录重复传入 `--code <code-dir>`，并让命令行 `--entry` 相对于它们的共同父目录，服务端会按 Maker 行为转换为相对于入口资源根的路径。用可持续会话启动 `uv run --project <skill-dir>/scripts tapmaker-local-web preview start --code <code-dir> --entry <entry> --orientation <orientation> --detached --no-open --port 0`（前台调试可用 `web` 子命令）。保留服务器输出中的实际 URL；不要猜测端口或吞掉启动错误。检测到联机/server 项目时启动会自动申请官方测试游戏并直连；需要本机已 `taptap-maker login` 且项目已提交构建，单机调试可用 `--multiplayer off` 跳过。
 6. 需要功能验收时，用可用的浏览器自动化打开该 URL。横屏按手机 CSS viewport `844 × 390` 验收，竖屏按 `390 × 844` 验收；其他尺寸只在任务涉及它们时切换并汇报。
 7. 至少确认项目入口已执行、目标功能可见或可操作、本次涉及的代表性资源实际加载，且浏览器与引擎日志没有相关 `ERROR`。修改一个任务内文件后，确认页面能在 revision 变化后自动重载。验收证据优先用同参 `preview check`（里程碑与错误计数）、`preview logs`（页面上报日志）和 `preview screenshot`（页面回传 PNG）；截图需要先有浏览器打开预览页，否则返回 409。
-8. 验收后用同参 `preview stop` 停止会话（前台 `web` 用 Ctrl-C），除非用户明确要求保持运行。最终回报 entry、URL、控制台地址、Runtime 模式、验收结果和是否已停止；不在公开回报中暴露本机绝对路径。
+8. 验收后用同参 `preview stop` 停止会话（前台 `web` 用 Ctrl-C），除非用户明确要求保持运行。最终回报 entry、URL、联机状态、Runtime 模式、验收结果和是否已停止；不在公开回报中暴露本机绝对路径。
 
 ## 行为边界
 
 - `--runtime auto` 是默认值：优先本地 Runtime，无缓存时使用 CDN。只在验证本地缓存时用 `local`，在差分 Runtime 缓存问题时用 `remote`。
-- 默认的平台 mock 提供本地用户 `900000001`、昵称与内存云值。它只是游戏侧契约替身，不代表真实登录或云存档。普通本地测试不禁用；只在排查 Runtime 原始行为时使用 `--no-platform-mock`。
+- 默认的平台 mock 提供本地用户 `900000001`、昵称与内存云值。它只是游戏侧契约替身，不代表真实登录或云存档。普通本地测试不禁用；只在排查 Runtime 原始行为时使用 `--no-platform-mock`。联机直连启动时自动禁用 mock。
+- 联机/server 项目（`@runtime.multiplayer`、`entry@server`、`scripts/server_main.lua` 等）启动时自动申请官方测试游戏并直连：需要本机已有 `taptap-maker login` 的 PAT，项目已提交构建（版本取 `dist/latest.json` 或 `project.json`，可用 `--project-version` 覆盖）。测试服服务端运行远端已构建版本；本地 server 代码修改需提交构建后才生效，客户端改动仍走本地热重载。`--multiplayer off` 跳过测试服按单机预览。不回显 PAT、kid/mac_key 或任何凭据。
 - Runtime 同步只本地化 `UrhoXRuntime.js`、`UrhoXRuntime.wasm` 和 `UrhoXRuntime.data`。Player 外壳、engine-res、official-res 仍可能访问 CDN；不得宣称完全离线。
 - 当前 Maker 官方标准资源根是 `assets + scripts`。三个及更多显式 `--code` 仅是本地预览扩展兼容，不得据此宣称当前 Maker MCP 远端构建支持三资源根。
-- 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 Maker test 发布流程；未经授权不得触发远程构建。
+- 本地页面不证明远程项目绑定、计费归属或 production 行为；排行榜、广告、平台权限等仍需真实平台环境，转入仓库的 Maker test 发布流程；未经授权不得触发远程构建。
 - 将 host 绑定为 `0.0.0.0` 会把无登录保护、允许跨源读取的项目服务暴露给局域网。只在用户要求其他设备访问且网络可信时使用。
 
 启动参数、资源诊断或常见错误需要更多细节时，读取 [操作与排错](references/operations.md)。

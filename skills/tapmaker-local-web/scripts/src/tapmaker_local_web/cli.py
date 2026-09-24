@@ -54,6 +54,20 @@ def _add_start_arguments(command: argparse.ArgumentParser, *, detached: bool) ->
         "--size",
         help="预览视口尺寸 WxH（100-4096），例如 1260x540；缺省使用方向默认尺寸",
     )
+    command.add_argument(
+        "--multiplayer",
+        choices=("auto", "off"),
+        default="auto",
+        help="联机测试服直连（默认 auto：检测到联机/server 项目时自动申请测试游戏）",
+    )
+    command.add_argument(
+        "--project-version",
+        help="联机预览使用的测试构建版本；缺省依次读取 dist/latest.json 与 project.json",
+    )
+    command.add_argument(
+        "--pat",
+        help="手动指定 Maker PAT（仅应急；优先 taptap-maker login 或 MAKER_PAT 环境变量）",
+    )
     if detached:
         command.add_argument(
             "--detached",
@@ -139,11 +153,21 @@ def _run_start(args: argparse.Namespace, *, detached: bool) -> int:
             argv.append("--no-platform-mock")
         if args.size:
             argv += ["--size", args.size]
+        argv += ["--multiplayer", args.multiplayer]
+        if args.project_version:
+            argv += ["--project-version", args.project_version]
+        if args.pat:
+            argv += ["--pat", args.pat]
         if args.no_open:
             argv.append("--no-open")
         record = session.start_detached(project, argv)
         print(f"TapMaker 本地 Web 预览（后台）：{record.url}")
-        print(f"控制台：{record.base_url()}/console")
+        if record.test_server is not None:
+            server_info = record.test_server
+            print(
+                f"联机测试服：ws://{server_info.get('pod_ip')}:{server_info.get('ws_port')}"
+                f"（userId={server_info.get('user_id')}，测试版本 {server_info.get('version')}）"
+            )
         print(f"PID={record.pid} 会话目录={session.session_dir(project.name)}")
         print("管理：preview status|refresh|logs|screenshot|check|stop（需相同的 --code/--entry）")
         return 0
@@ -158,6 +182,9 @@ def _run_start(args: argparse.Namespace, *, detached: bool) -> int:
         orientation=args.orientation,
         size=size,
         state_root_dir=session.state_root(),
+        multiplayer=args.multiplayer,
+        project_version=args.project_version,
+        pat=args.pat,
     )
     return 0
 

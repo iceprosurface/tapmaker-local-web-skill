@@ -45,12 +45,13 @@ class SessionRecord:
     project: str
     entry: str
     started_at: str
+    test_server: dict[str, object] | None = None
 
     def base_url(self, host: str = "127.0.0.1") -> str:
         return f"http://{host}:{self.port}"
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "pid": self.pid,
             "port": self.port,
             "token": self.token,
@@ -59,12 +60,16 @@ class SessionRecord:
             "entry": self.entry,
             "started_at": self.started_at,
         }
+        if self.test_server is not None:
+            value["test_server"] = self.test_server
+        return value
 
     @classmethod
     def from_dict(cls, value: object) -> "SessionRecord":
         if not isinstance(value, dict):
             raise WorkspaceError("会话记录格式无效")
         try:
+            test_server = value.get("test_server")
             return cls(
                 pid=int(value["pid"]),
                 port=int(value["port"]),
@@ -73,6 +78,7 @@ class SessionRecord:
                 project=str(value["project"]),
                 entry=str(value["entry"]),
                 started_at=str(value.get("started_at") or ""),
+                test_server=test_server if isinstance(test_server, dict) else None,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise WorkspaceError("会话记录字段无效") from error
@@ -100,7 +106,15 @@ def remove_record(project_name: str, *, root: Path | None = None) -> None:
     (session_dir(project_name, root=root) / SESSION_FILE).unlink(missing_ok=True)
 
 
-def new_record(project: str, entry: str, url: str, port: int, token: str) -> SessionRecord:
+def new_record(
+    project: str,
+    entry: str,
+    url: str,
+    port: int,
+    token: str,
+    *,
+    test_server: dict[str, object] | None = None,
+) -> SessionRecord:
     return SessionRecord(
         pid=os.getpid(),
         port=port,
@@ -109,6 +123,7 @@ def new_record(project: str, entry: str, url: str, port: int, token: str) -> Ses
         project=project,
         entry=entry,
         started_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        test_server=test_server,
     )
 
 

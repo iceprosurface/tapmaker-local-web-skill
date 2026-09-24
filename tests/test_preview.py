@@ -264,7 +264,7 @@ target = "assets"
         self.assertIn("no_connected_page", check["reasons"])
         self.assertIn("entry_not_served", check["reasons"])
         self.assertEqual(check["viewport"], {"width": 844, "height": 390})
-        self.assertIn("/console", check["console_url"])
+        self.assertFalse(check["multiplayer"])
 
     def test_serving_entry_asset_marks_entry_served(self) -> None:
         manifest = self.state.manifest()
@@ -337,17 +337,6 @@ target = "assets"
         self.assertIn(b"preserveDrawingBuffer", page)
         self.assertIn(b"/__tapmaker/report/logs", page)
         self.assertIn(b"addEventListener('command'", page)
-        self.assertIn(b'href="/console"', page)
-
-    def test_console_page_serves_management_ui(self) -> None:
-        with urlopen(f"{self.base}/console") as response:
-            page = response.read()
-        self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
-        self.assertIn(f'content="{self.token}"'.encode(), page)
-        self.assertIn(b"/__tapmaker/check", page)
-        self.assertIn(b"/__tapmaker/control/refresh", page)
-        self.assertIn(b"/__tapmaker/control/screenshot", page)
-        self.assertIn(b"/__tapmaker/logs", page)
 
     def test_custom_viewport_size_updates_canvas_ratio(self) -> None:
         server = LocalWebServer(("127.0.0.1", 0), self.state, size=(1260, 540))
