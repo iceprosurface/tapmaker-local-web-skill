@@ -29,6 +29,11 @@ uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
   --entry "$TAPMAKER_ENTRY" --orientation portrait --no-open
 
+# 自定义视口尺寸（100-4096），对应官方控制台的窗口预设
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  web --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --size 1260x540 --no-open
+
 # 强制验证本地 Runtime 缓存
 uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
   web --code "$TAPMAKER_LOCAL_CODE_DIR" \
@@ -56,6 +61,44 @@ Runtime 缓存默认位于：
 - 其他系统：`$XDG_CACHE_HOME/tapmaker/web-runtime`，未设置时使用 `~/.cache/tapmaker/web-runtime`
 
 可用 `TAPMAKER_WEB_RUNTIME_CACHE` 或命令的 `--cache`/`--runtime-cache` 覆盖。`sync`、`status` 和 `web` 必须指向同一个自定义缓存。
+
+## preview 会话与控制台
+
+`preview` 命令组复刻官方 `taptap-maker preview` 的工作流（页面即预览窗口）：
+
+```bash
+# 后台启动（会话记录写入用户缓存目录，合 --port 0 自动分配端口）
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web \
+  preview start --code "$TAPMAKER_LOCAL_CODE_DIR" \
+  --entry "$TAPMAKER_ENTRY" --detached --no-open --port 0
+
+# 管理动词（需要与 start 相同的 --code/--entry 来定位会话）
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview status  --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview refresh --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview logs    --code … --entry … --follow
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview screenshot --code … --entry … --out shot.png
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview check   --code … --entry …
+uv run --project "$TAPMAKER_LOCAL_SKILL_DIR/scripts" tapmaker-local-web preview stop    --code … --entry …
+```
+
+- 会话目录默认位于 `~/Library/Caches/TapMaker/local-web/<项目命名空间>/`（其他系统在
+  `$XDG_CACHE_HOME/tapmaker/local-web/`），含 `session.json`、`server.log`、`page.log` 与截图；
+  可用 `TAPMAKER_LOCAL_WEB_STATE_ROOT` 覆盖。
+- `/console` 是本地控制台页：状态卡、预览刷新、截图、日志尾部与缺 `.meta` 诊断。
+- 预览页会把 console/window 错误与里程碑上报到服务端：`check` 汇总 `entry_served`、
+  `connected_pages`、错误计数与诊断；`started=false` 时 `reasons` 说明缺口。
+- 截图通过 SSE 命令请求页面回传 canvas PNG；没有人打开过预览页时返回 409。
+- 所有写操作（refresh/shutdown/screenshot/上报）需 `X-TapMaker-Control` 令牌；令牌存在
+  `session.json` 并嵌入页面。loopback 绑定时同时校验 `Host` 头。
+- `preview logs` 只包含页面上报的日志环形缓冲（默认 2000 行）；服务端启动输出在
+  `server.log`。
+
+排错：
+
+- `preview status` 报 `process_exited` 但记录仍在：上次进程异常退出未清理，直接重新 `preview start` 覆盖即可。
+- POST 返回 403：令牌不匹配（会话是旧进程启动的）或 Host 校验失败；重新启动会话。
+- 截图 409：先用浏览器打开预览 URL（或控制台）再截图。
+- `stop` 超时：先看 `server.log`；必要时 `stop --force`。
 
 ## 运行机制
 

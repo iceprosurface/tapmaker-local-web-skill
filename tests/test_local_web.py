@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import zlib
 
@@ -136,8 +136,18 @@ target = "assets"
         def request_revision() -> None:
             try:
                 barrier.wait()
-                with urlopen(f"{base}/__tapmaker/revision") as response:
-                    self.assertEqual(response.status, 200)
+                for attempt in range(3):
+                    try:
+                        with urlopen(f"{base}/__tapmaker/revision") as response:
+                            self.assertEqual(response.status, 200)
+                        break
+                    except URLError as transient:
+                        # macOS 突发并发连接时 connect 偶发 EINVAL/EPIPE，与测试意图无关。
+                        reason = transient.reason
+                        if attempt == 2 or not (
+                            isinstance(reason, OSError) and reason.errno in (22, 32, 54)
+                        ):
+                            raise
             except BaseException as error:
                 failures.append(error)
 
