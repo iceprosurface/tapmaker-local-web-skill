@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise(resolve => ws.onopen = resolve);
   let sequence = 0;
-  const pending = new Map(), external = [], errors = [], responses = [], logs = [];
+  const pending = new Map(), external = [], errors = [], responses = [], logs = [], gpuFallback = [];
   function send(method, params = {}) {
     return new Promise((resolve, reject) => {
       const id = ++sequence;
@@ -41,7 +41,8 @@ const assert = require('node:assert/strict');
     } else if (m.method === 'Runtime.consoleAPICalled') {
       const values = m.params.args.map(a => a.value || a.description);
       logs.push(values);
-      if (m.params.type === 'error' || values.some(v => typeof v === 'string' && /\bERROR:/.test(v))) errors.push(values);
+      if (process.env.ALLOW_WEBGPU_FALLBACK === '1' && values.length === 1 && values[0] === 'WebGPU bootstrap failed at RequestAdapter: WebGPU not available on this browser (requestAdapter returned null)') gpuFallback.push(values[0]);
+      else if (m.params.type === 'error' || values.some(v => typeof v === 'string' && /\bERROR:/.test(v))) errors.push(values);
     } else if (m.method === 'Log.entryAdded' && m.params.entry.level === 'error' && !m.params.entry.url?.endsWith('/favicon.ico')) {
       errors.push(m.params.entry);
     }
@@ -80,13 +81,14 @@ const assert = require('node:assert/strict');
     assert.deepEqual(failed, []);
     assert.ok(responses.some(r => r.url.includes('/src/web/src/index.min.js') && r.status === 200));
     assert.ok(responses.some(r => r.url.endsWith('/UrhoXRuntime.wasm') && r.status === 200));
+    if (gpuFallback.length) console.log('NOTE: WebGPU unavailable; verified rendered interaction with fallback backend');
     console.log('PASS: fresh cache, offline Player + WASM, Lua query/start/add/reset, zero external requests or errors');
   } catch (error) {
     console.error(error);
     console.error(JSON.stringify({external, errors, failed: responses.filter(r => r.status >= 400)}, null, 2));
     process.exitCode = 1;
   } finally {
-    if (process.env.EVIDENCE_PATH) fs.writeFileSync(process.env.EVIDENCE_PATH, JSON.stringify({external, errors, responses, logs}, null, 2));
+    if (process.env.EVIDENCE_PATH) fs.writeFileSync(process.env.EVIDENCE_PATH, JSON.stringify({external, errors, responses, logs, gpuFallback}, null, 2));
     for (const p of pending.values()) clearTimeout(p.timer);
     ws.close();
   }

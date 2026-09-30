@@ -12,7 +12,7 @@ import gzip
 import json
 import re
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zlib
 
 from .config import WorkspaceError
@@ -26,6 +26,7 @@ PLAYER_PATHS = (
     "/src/web/libs/eruda.min.js",
     "/src/web/libs/mp4-muxer.mjs",
 )
+DOCUMENTATION_PATHS = frozenset({"Fonts/read_me.html"})
 DEFAULT_GROUPS = ("official-shaders", "official-shadercache")
 CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
@@ -46,13 +47,22 @@ def json_bytes(value: object) -> bytes:
     ).encode()
 
 
+class _OfficialRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith(ORIGIN + "/src/"):
+            raise WorkspaceError(
+                "Offline download redirect outside the official HTTPS asset origin"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _get(path: str, *, limit: int = 256 * 1024 * 1024) -> bytes:
     # Paths come from fixed endpoints or validated manifest identifiers, never
     # from a browser request. TLS verification stays at urllib's secure default.
     if not path.startswith("/src/") or ".." in path or "?" in path or "#" in path:
         raise WorkspaceError(f"Invalid official resource path: {path}")
     request = Request(ORIGIN + path, headers={"Accept-Encoding": "identity"})
-    with urlopen(request, timeout=60) as response:
+    with build_opener(_OfficialRedirects()).open(request, timeout=60) as response:
         if not response.url.startswith(ORIGIN + "/src/"):
             raise WorkspaceError("Unexpected offline download redirect")
         content = (
@@ -143,7 +153,7 @@ def _selection(
         (name, key)
         for name in ("engine", "engine-res", "engine-startup", "urhox-libs")
         for key, item in indices[name].items()
-        if item.get("ext") != ".html"
+        if item.get("fs_path") not in DOCUMENTATION_PATHS
     }
     matches = set()
     literals = set(re.findall(r"[\w./\-]+", texts))
@@ -239,6 +249,12 @@ def sync_offline(
         manifest = json.loads(manifest_data)
         if set(manifest.get("sources", {})) - set(SOURCES):
             raise WorkspaceError(f"Unsupported dependencies in {name}")
+        for dependency, specification in manifest.get("sources", {}).items():
+            expected = f"{ORIGIN}/src/{dependency}/"
+            if specification.get("base_url", expected).rstrip("/") != expected.rstrip(
+                "/"
+            ):
+                raise WorkspaceError(f"Unsupported source origin: {name}/{dependency}")
         versions[name], manifests[name] = version, manifest
         add(path, manifest_data)
         add(version_path, version_data)
@@ -416,11 +432,15 @@ class OfflineBundle:
                 manifest = json.loads(data)
                 # Paks can contain unselected assets; use the verified per-file
                 # graph, without implicitly fetching multi-gigabyte archives.
-                manifest.pop("assets_pak", None)
-                manifest.pop("paks", None)
+                manifest["assets_pak"] = 0
+                manifest["paks"] = []
                 # Documentation is excluded from the executable offline graph,
                 # including default-group preload lists derived by the Runtime.
                 if not path.startswith("/src/official-res/"):
-                    manifest["files"] = [f for f in manifest["files"] if f.get("ext") != ".html"]
+                    manifest["files"] = [
+                        f
+                        for f in manifest["files"]
+                        if f.get("fs_path") not in DOCUMENTATION_PATHS
+                    ]
                 data = json_bytes(manifest)
         return data

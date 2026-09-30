@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import gzip
+import io
 from pathlib import Path
 import tempfile
 import threading
@@ -14,6 +16,8 @@ import zlib
 
 from tapmaker_local_web.config import WorkspaceError, direct_project
 from tapmaker_local_web.offline import (
+    _get,
+    _OfficialRedirects,
     OfflineBundle,
     ORIGIN,
     PREFIX,
@@ -202,6 +206,40 @@ class OfflineTest(unittest.TestCase):
         with self.assertRaises(WorkspaceError):
             asset_path("engine", {"uuid": "../escape", "hash": "123", "ext": ".js"})
 
+    def test_unknown_manifest_origin_is_rejected_before_asset_download(self):
+        manifest = self.manifests["official-res"]
+        manifest["sources"] = {"engine-res": {"base_url": "https://unrelated.example/"}}
+        self.remote["/src/official-res/1.0/manifest-official-res.json"] = json_bytes(
+            manifest
+        )
+        with self.assertRaisesRegex(WorkspaceError, "Unsupported source origin"):
+            self.sync()
+        self.assertFalse(any("/assets/" in path for path in self.calls))
+
+    def test_only_known_documentation_is_omitted_from_preload_manifest(self):
+        manifest = self.manifests["engine-res"]
+        for key, path in (("readme", "Fonts/read_me.html"), ("page", "UI/page.html")):
+            data = b"<html>test</html>"
+            item = {
+                "uuid": key,
+                "ext": ".html",
+                "hash": f"{zlib.crc32(data):08x}",
+                "size": len(data),
+                "fs_path": path,
+                "groups": ["default"],
+            }
+            manifest["files"].append(item)
+            self.remote[asset_path("engine-res", item)] = data
+        manifest_path = "/src/engine-res/1.0/manifest-engine-res.json"
+        self.remote[manifest_path] = json_bytes(manifest)
+        bundle = OfflineBundle(self.cache, self.sync())
+        served = json.loads(bundle.render(manifest_path, "http://127.0.0.1:1"))
+        paths = {f["fs_path"] for f in served["files"]}
+        self.assertNotIn("Fonts/read_me.html", paths)
+        self.assertIn("UI/page.html", paths)
+        self.assertEqual(served["assets_pak"], 0)
+        self.assertEqual(served["paks"], [])
+
     def test_declared_platform_variants_are_cached_and_verified(self):
         f = self.manifests["engine-res"]["files"][0]
         data = b"platform variant"
@@ -259,7 +297,7 @@ class OfflineTest(unittest.TestCase):
                 with urlopen(
                     base + PREFIX + "/src/engine/1.0/manifest-engine.json"
                 ) as r:
-                    self.assertNotIn("paks", json.load(r))
+                    self.assertEqual(json.load(r)["assets_pak"], 0)
                 with urlopen(base + "/UrhoXRuntime.wasm") as r:
                     self.assertEqual("application/wasm", r.headers["Content-Type"])
                 with self.assertRaises(HTTPError) as error:
@@ -270,6 +308,27 @@ class OfflineTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+class DownloadTest(unittest.TestCase):
+    def test_gzip_is_decoded_before_size_and_checksum_validation(self):
+        response = io.BytesIO(gzip.compress(b"asset content"))
+        response.url = ORIGIN + "/src/engine/assets/example"
+        response.headers = {"Content-Encoding": "gzip"}
+        with patch("tapmaker_local_web.offline.build_opener") as factory:
+            factory.return_value.open.return_value = response
+            self.assertEqual(
+                _get("/src/engine/assets/example", limit=13), b"asset content"
+            )
+
+    def test_redirect_does_not_downgrade_tls_or_contact_another_origin(self):
+        handler = _OfficialRedirects()
+        for url in (
+            "http://tapcode-sce.spark.xd.com/src/a",
+            "https://other.example/src/a",
+        ):
+            with self.assertRaisesRegex(WorkspaceError, "outside"):
+                handler.redirect_request(None, None, 302, "", {}, url)
 
 
 class RuntimeIntegrityTest(unittest.TestCase):

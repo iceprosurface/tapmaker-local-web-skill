@@ -489,7 +489,7 @@ uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web web \
 `--offline-cache` 不与 `--runtime`/`--runtime-cache` 混用，只允许绑定 `127.0.0.1`。
 
 离线包包含 Player、二维码/调试/录像脚本依赖、固定版本的引擎启动清单、Runtime、engine-startup、urhox-libs、
-全部 engine-res 运行资源（不预取 HTML 说明文档，离线清单也排除这些文档），以及选中的 official-res 文件与 UUID 引用闭包。
+全部 engine-res 运行资源（不预取 `Fonts/read_me.html` 字体说明，离线清单也排除此文档），以及选中的 official-res 文件与 UUID 引用闭包。
 默认选择官方 shader/shadercache 分组，并扫描所挂载项目文本资源中的路径/UUID 字面量。
 **动态拼接的资源名无法由静态扫描证明完整**；准备时显式补充（可重复）：
 

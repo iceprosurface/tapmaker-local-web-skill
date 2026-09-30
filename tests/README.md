@@ -72,3 +72,8 @@ SCREENSHOT_PATH=/tmp/offline-score-1.png node tests/browser_offline_smoke.cjs
 CSP 与该请求拦截各自独立，均不改变证书校验。完成后关闭专用 Chromium 并停止服务。
 普通 `unittest` 使用小型模拟 CDN，覆盖资源选择/引用、预算、损坏/缺失缓存、版本混用、
 不联网的 status/HTTP 路由；不需要下载第三方引擎。
+
+若无头环境不提供 WebGPU，但允许 WebGL 软件渲染，可显式设置 `ALLOW_WEBGPU_FALLBACK=1`。
+测试仅将精确匹配的 RequestAdapter 不可用提示单独记录为 `gpuFallback`；仍须通过实际
+Lua 交互、截图检查、零外联及全部其他错误断言。它不是 TLS 或网络安全例外。
+可用 `EVIDENCE_PATH=/tmp/offline-evidence.json` 保存全部请求、控制台与回退记录。
