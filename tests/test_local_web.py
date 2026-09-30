@@ -90,6 +90,22 @@ target = "assets"
         paths = {item["fs_path"] for item in state.manifest()["files"]}
         self.assertNotIn("__tapmaker_project_entry.lua", paths)
 
+    def test_local_bridge_modules_are_generated_without_mutating_source(self) -> None:
+        for mock in (True, False):
+            state = LocalWebProject(self.project, platform_mock=mock)
+            files = {item["fs_path"]: item for item in state.manifest()["files"]}
+            for name in ("__tapmaker_local_build_info.lua", "__tapmaker_local_bridge.lua"):
+                item = files[name]
+                asset = state.asset(f"{item['uuid']}-{item['hash']}{item['ext']}")
+                self.assertGreater(len(asset.read()), 0)
+                self.assertFalse((self.root / "apps/demo/scripts" / name).exists())
+
+    def test_reserved_bridge_resource_cannot_be_overridden(self) -> None:
+        from tapmaker_local_web.config import WorkspaceError
+        (self.root / "apps/demo/scripts/__tapmaker_local_bridge.lua").write_text("return {}")
+        with self.assertRaises(WorkspaceError):
+            LocalWebProject(self.project).manifest()
+
     def test_refresh_changes_revision_and_asset_url_after_source_change(self) -> None:
         before = {item["fs_path"]: item for item in self.state.manifest()["files"]}
         revision = self.state.revision
