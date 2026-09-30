@@ -53,3 +53,22 @@ luajit examples/local-command-demo.lua
 该脚本验证 CDP → JavaScript → Lua → UI 调用链。WebMCP 宿主的工具发现与调用，需要在支持它的客户端另行验证。
 
 完成后关闭专用 Chrome，按 Ctrl-C 停止示例服务器。不要停止其他任务的进程。
+
+## 干净缓存的完整离线验收
+
+先为 `examples/demo-project` 准备离线包，用 `--offline-cache` 启动 Demo。
+启动一个**全新用户目录**、CDP 地址仅为 `127.0.0.1` 的 Chromium，初始页面为
+`about:blank`；不增加忽略证书或 TLS 校验的参数。然后执行：
+
+```bash
+CDP_URL=http://127.0.0.1:9359 \
+PAGE_URL='<服务器实际输出的离线Demo URL>' \
+SCREENSHOT_PATH=/tmp/offline-score-1.png node tests/browser_offline_smoke.cjs
+```
+
+脚本清空站点存储、禁用 HTTP 缓存，在导航前拒绝并记录每个非同源 HTTP(S) 请求；
+验证本地 Player/WASM、Lua 入口、query/start/add/reset、请求错误与控制台错误，并保存
+真实画面供人工检查。必须同时满足零外部请求、零相关错误和业务断言；HTTP 200 不等于通过。
+CSP 与该请求拦截各自独立，均不改变证书校验。完成后关闭专用 Chromium 并停止服务。
+普通 `unittest` 使用小型模拟 CDN，覆盖资源选择/引用、预算、损坏/缺失缓存、版本混用、
+不联网的 status/HTTP 路由；不需要下载第三方引擎。

@@ -465,3 +465,56 @@ tapmaker-local-web web \
 支持 `window.tapmakerLocal.call` 与可选 WebMCP `tapmaker_local_command`，经内存文件系统调用应用显式白名单的 Lua dispatcher。包含就绪等待、串行调用、响应配对与超时保护。接入方式、CDP 示例和运行边界见 [本地命令桥](skills/tapmaker-local-web/references/local-commands.md)。
 
 开发者运行协议测试和真实浏览器验收时，参见 [测试说明](tests/README.md)。
+
+## 完整离线预览（显式资源包）
+
+`--runtime local` 保持原有语义，只缓存 Runtime 三件套。要让浏览器完全不访问
+CDN，请在联网时单独准备离线包，再使用 `--offline-cache`：
+
+```bash
+uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web web-offline sync \
+  --cache /absolute/path/to/offline-cache \
+  --code /absolute/path/to/game --entry scripts/main.lua
+
+uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web web-offline status \
+  --cache /absolute/path/to/offline-cache
+
+uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web web \
+  --code /absolute/path/to/game --entry scripts/main.lua \
+  --offline-cache /absolute/path/to/offline-cache --no-open
+```
+
+同步输出内容寻址的 SHA256 快照 ID。用 `web --offline-snapshot <ID>` 或
+`web-offline status --snapshot <ID>` 固定旧快照，不跟随之后的同步。
+`--offline-cache` 不与 `--runtime`/`--runtime-cache` 混用，只允许绑定 `127.0.0.1`。
+
+离线包包含 Player、二维码/调试/录像脚本依赖、固定版本的引擎启动清单、Runtime、engine-startup、urhox-libs、
+全部 engine-res 运行资源（不预取 HTML 说明文档，离线清单也排除这些文档），以及选中的 official-res 文件与 UUID 引用闭包。
+默认选择官方 shader/shadercache 分组，并扫描所挂载项目文本资源中的路径/UUID 字面量。
+**动态拼接的资源名无法由静态扫描证明完整**；准备时显式补充（可重复）：
+
+```bash
+tapmaker-local-web web-offline sync --cache /path/to/cache \
+  --code /path/to/game --entry scripts/main.lua \
+  --official-resource '实际官方资源路径或UUID' --official-group '实际官方分组名'
+```
+
+不递归爬取 CDN，也不默认下载整个官方美术库。下载前输出资源数量/大小；默认资产预算
+512 MiB，可显式用 `--max-bytes` 调整。`official-res` 清单保留完整目录，但只下载已选资源；
+运行时请求未准备的资源会返回 503，终端标明路径及补充同步方法，绝不代理或回退 CDN。
+源码热重载不会自动扩展离线包；新增官方资源引用后应重新同步并重启服务。
+
+每个快照记录来源 HTTPS URL、来源 version/client、原始清单、文件大小/CRC32 和本地
+SHA256 内容摘要。Player 无上游版本清单，使用 HTTPS 获取时的 SHA256 固定其精确字节；
+摘要用于完整性和可复现性，不是第三方签名。原始文件不改写；服务端在内存中将已知官方
+CDN 地址映射到缓存路由（包含 WASM/Lua 内构造 URL 的 fetch/XHR 适配），并移除可能包含未选资源的大型 pak 引用，使用逐文件资源。
+HTTP 页面施加仅允许同源的 CSP；任意外部 API、登录、广告、上传和联机均不属于离线契约。
+未知 Player 新依赖会明确失败，需要升级适配和重新验收，而不会自动下载未知地址。
+
+`status` 与启动都校验快照元数据、全部已缓存文件及引擎版本配套。缓存丢失、损坏或版本
+混用时失败；重新同步可修复文件。现有 `web-runtime sync/status` 也会校验 CRC32，
+不会再把同大小损坏文件视为可用；无有效 Runtime 时 status 返回非零状态。
+大型第三方资源仅保存在用户指定缓存中，不提交到此仓库。
+
+真实浏览器离线验收见 [tests/README.md](tests/README.md)。离线能力不修改 TLS 校验、
+系统/浏览器证书信任或代理配置，也不修复环境的 NSS 权限问题。
