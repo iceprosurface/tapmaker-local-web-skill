@@ -21,6 +21,7 @@ import zlib
 from watchfiles import watch
 
 from .config import Project, WorkspaceError, _render_build_info
+from .offline import OfflineBundle, ORIGIN, PREFIX, CSP
 
 
 ENGINE_BASE_URL = "https://tapcode-sce.spark.xd.com/src/engine/"
@@ -85,11 +86,27 @@ def current_web_runtime(cache_root: Path | None = None) -> Path | None:
         if not isinstance(relative, str) or Path(relative).name != relative:
             return None
         runtime = root / relative
-        if all((runtime / name).is_file() for name in RUNTIME_FILES):
+        metadata = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
+        if runtime.name != f"{metadata['version']}-{metadata['client']}":
+            return None
+        if all(_valid_runtime_file(runtime / name, metadata["files"][name]) for name in RUNTIME_FILES):
             return runtime
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError):
         pass
     return None
+
+
+def _valid_runtime_file(path: Path, metadata: dict) -> bool:
+    try:
+        crc = 0
+        size = 0
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                crc = zlib.crc32(block, crc)
+                size += len(block)
+        return size == metadata["size"] and f"{crc & 0xffffffff:08x}" == metadata["hash"]
+    except (OSError, KeyError, TypeError):
+        return False
 
 
 def _runtime_etags(runtime_dir: Path | None) -> dict[str, str]:
@@ -152,7 +169,7 @@ def sync_web_runtime(
         asset_name = f"{item['uuid']}-{item['hash']}{extension}"
         destination = runtime / name
         expected_size = int(item["size"])
-        if destination.is_file() and destination.stat().st_size == expected_size:
+        if _valid_runtime_file(destination, item):
             continue
         temporary = runtime / f".{name}.part"
         request = Request(base + "assets/" + asset_name, headers={"Accept-Encoding": "identity"})
@@ -770,10 +787,12 @@ class LocalWebServer(ThreadingHTTPServer):
         runtime_dir: Path | None = None,
         *,
         orientation: str = "landscape",
+        offline: OfflineBundle | None = None,
     ):
         if orientation not in ORIENTATION_SIZES:
             available = ", ".join(ORIENTATION_SIZES)
             raise WorkspaceError(f"未知预览方向：{orientation}；可用方向：{available}")
+        self.offline = offline
         self.state = state
         self.runtime_dir = runtime_dir
         self.orientation = orientation
@@ -782,6 +801,11 @@ class LocalWebServer(ThreadingHTTPServer):
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         super().__init__(address, _LocalWebHandler)
+        if offline is not None:
+            bootstrap = Path(__file__).with_name("offline_bootstrap.js").read_bytes()
+            bootstrap = bootstrap.replace(b"__OFFLINE_ORIGIN__", ORIGIN.encode()).replace(b"__OFFLINE_PREFIX__", PREFIX.encode())
+            self.index_html = self.index_html.replace(b"<head>", b"<head><script>" + bootstrap + b"</script>")
+            self.index_html = self.index_html.replace(PLAYER_SCRIPT_URL.encode(), (PREFIX + "/src/web/src/index.min.js").encode())
 
     @property
     def url(self) -> str:
@@ -789,7 +813,7 @@ class LocalWebServer(ThreadingHTTPServer):
         display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
         query = f"skip_login&verbose=true&screen_orientation={self.orientation}"
         query += f"&entry={quote(self.state.deployment.entry, safe='/')}"
-        if self.runtime_dir is not None:
+        if self.runtime_dir is not None or self.offline is not None:
             query += "&local_engine=true"
         return f"http://{display_host}:{port}/?{query}"
 
@@ -925,6 +949,22 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
     def _handle(self, *, head_only: bool) -> None:
         path = urlsplit(self.path).path
         try:
+            if self.server.offline is not None:
+                offline_path = None
+                if path.startswith(PREFIX + "/"):
+                    offline_path = path[len(PREFIX):]
+                elif path.removeprefix("/") in RUNTIME_FILES:
+                    offline_path = self.server.offline.runtime_paths[path.removeprefix("/")]
+                if offline_path is not None:
+                    try:
+                        data = self.server.offline.render(offline_path, self._offline_base())
+                    except WorkspaceError as error:
+                        print(str(error), file=sys.stderr, flush=True)
+                        self._send(503, str(error).encode(), "text/plain; charset=utf-8", head_only)
+                        return
+                    media = mimetypes.guess_type(offline_path)[0] or "application/octet-stream"
+                    self._send(200, data, media, head_only)
+                    return
             if path == "/":
                 self._send(200, self.server.index_html, "text/html; charset=utf-8", head_only)
                 return
@@ -1008,10 +1048,21 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                 previous = revision
             self.wfile.flush()
 
+    def _offline_base(self) -> str:
+        host, port = self.server.server_address[:2]
+        return f"http://{host}:{port}{PREFIX}"
+
     def _send_json(self, value: object, head_only: bool) -> None:
+        if self.server.offline is not None and isinstance(value, dict) and "sources" in value:
+            value = dict(value)
+            value["sources"] = {**value["sources"], "engine-startup": {
+                "tag": "stable", "base_url": ORIGIN + "/src/engine-startup/"},
+                "urhox-libs": {"tag": "stable", "base_url": ORIGIN + "/src/urhox-libs/"}}
         body = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
+        if self.server.offline is not None:
+            body = body.replace(ORIGIN.encode(), self._offline_base().encode())
         self._send(200, body, "application/json; charset=utf-8", head_only)
 
     def _send_asset(self, asset: AssetRecord, media_type: str, head_only: bool) -> None:
@@ -1083,6 +1134,8 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _common_headers(self, cache_control: str = DYNAMIC_CACHE_CONTROL) -> None:
+        if self.server.offline is not None:
+            self.send_header("Content-Security-Policy", CSP)
         self.send_header("Cache-Control", cache_control)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
@@ -1115,12 +1168,15 @@ def serve_local_web(
     runtime_cache: Path | None = None,
     platform_mock: bool = True,
     orientation: str = "landscape",
+    offline: OfflineBundle | None = None,
 ) -> None:
     state = LocalWebProject(project, deployment, platform_mock=platform_mock)
-    runtime_dir = None if runtime == "remote" else current_web_runtime(runtime_cache)
-    if runtime == "local" and runtime_dir is None:
+    if offline is not None and host != "127.0.0.1":
+        raise WorkspaceError("Offline preview requires --host 127.0.0.1")
+    runtime_dir = None if offline is not None or runtime == "remote" else current_web_runtime(runtime_cache)
+    if offline is None and runtime == "local" and runtime_dir is None:
         raise WorkspaceError("尚未同步 Web Runtime；请先运行 bin/tapmaker web-runtime sync")
-    server = LocalWebServer((host, port), state, runtime_dir, orientation=orientation)
+    server = LocalWebServer((host, port), state, runtime_dir, orientation=orientation, offline=offline)
     print(f"TapMaker 本地 Web 预览：{server.url}")
     print(
         f"项目={project.name} target={state.deployment.name} entry={state.deployment.entry} "
@@ -1128,7 +1184,9 @@ def serve_local_web(
     )
     _print_missing_meta(tuple(state.diagnostics()["missing_meta"]))
     print("源码变化后页面会自动重新加载；按 Ctrl-C 停止。")
-    print(f"Runtime={'本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN'}")
+    print(f"Runtime={'离线缓存包' if offline else ('本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN')}")
+    if offline is not None:
+        print(f"Offline snapshot={offline.id}; external requests blocked; no CDN fallback")
     print(f"平台能力={'本地 mock' if platform_mock else 'Runtime 原始能力'}")
     width, height = ORIENTATION_SIZES[orientation]
     print(f"预览方向={orientation} ({width}x{height})")
