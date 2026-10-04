@@ -1,5 +1,5 @@
 // Offline transport for URLs constructed inside WASM/Lua. Only the official
-// asset origin is mapped; the server serves a finite verified snapshot, never
+// asset origin is mapped; the server serves a finite verified cache, never
 // proxies. CSP independently denies all other external destinations.
 (() => {
   const official = '__OFFLINE_ORIGIN__';

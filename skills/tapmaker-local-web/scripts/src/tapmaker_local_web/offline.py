@@ -1,21 +1,16 @@
-"""Explicit, immutable offline snapshots. Only sync performs network I/O.
-
-Objects contain unmodified upstream bytes; the loopback server translates the
-one supported CDN origin in textual responses. No arbitrary URL proxy exists.
-"""
+"""One prepared offline cache. Only sync performs network I/O."""
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import gzip
 import json
 import re
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-import zlib
 
 from .config import WorkspaceError
+from .cache import download, file_checks, matches
 
 ORIGIN = "https://tapcode-sce.spark.xd.com"
 PREFIX = "/__tapmaker/offline"
@@ -34,10 +29,6 @@ CSP = (
     "font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; "
     "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 )
-
-
-def digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def json_bytes(value: object) -> bytes:
@@ -103,36 +94,17 @@ def variants(item: dict):
             yield {**item, "hash": checksum, "size": item["size@" + platform]}
 
 
-def _object(root: Path, checksum: str) -> Path:
-    if not re.fullmatch(r"[a-f0-9]{64}", checksum):
-        raise WorkspaceError("Invalid offline object checksum")
-    return root / "objects" / checksum
-
-
-def _store(root: Path, data: bytes) -> str:
-    checksum = digest(data)
-    path = _object(root, checksum)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.is_file() or digest(path.read_bytes()) != checksum:
-        temporary = path.with_suffix(".part")
-        temporary.write_bytes(data)
-        temporary.replace(path)
-    return checksum
-
-
-def _read(root: Path, checksum: str) -> bytes:
-    path = _object(root, checksum)
-    try:
-        data = path.read_bytes()
-    except OSError as error:
-        raise WorkspaceError(
-            f"Offline cache missing: {checksum}; run web-offline sync again"
-        ) from error
-    if digest(data) != checksum:
-        raise WorkspaceError(
-            f"Offline cache corrupt: {checksum}; run web-offline sync again"
-        )
-    return data
+def cache_path(root: Path, path: str) -> Path:
+    if (
+        not path.startswith("/src/")
+        or any(p in ("", ".", "..") for p in path[1:].split("/"))
+        or "\\" in path
+    ):
+        raise WorkspaceError(f"Invalid cache path: {path}")
+    result = root / path[1:]
+    if not result.resolve().is_relative_to(root.resolve()):
+        raise WorkspaceError(f"Cache path escapes directory: {path}")
+    return result
 
 
 def _selection(
@@ -218,20 +190,22 @@ def sync_offline(
     resources: list[str] | None = None,
     groups: list[str] | None = None,
     max_bytes: int = 512 * 1024 * 1024,
-) -> str:
-    """Prepare one complete selected snapshot, then atomically publish its ID.
-
-    The default is engine runtime resources (excluding HTML documentation), official shaders, and literal project
-    references. Dynamic official resource names require explicit selectors.
-    """
+) -> Path:
+    """Invalidate readiness first; publish cache.json only after complete sync."""
+    root.mkdir(parents=True, exist_ok=True)
+    ready = root / "cache.json"
+    ready.unlink(missing_ok=True)
     groups = list(DEFAULT_GROUPS) + (groups or [])
     versions, manifests, files = {}, {}, {}
 
     def add(path: str, data: bytes, source_path: str | None = None) -> None:
+        destination = cache_path(root, path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".part")
+        temporary.write_bytes(data)
+        temporary.replace(destination)
         files[path] = {
-            "sha256": _store(root, data),
-            "size": len(data),
-            "url": ORIGIN + path,
+            **file_checks(destination),
             "source_url": ORIGIN + (source_path or path),
         }
 
@@ -283,47 +257,24 @@ def sync_offline(
         flush=True,
     )
 
-    # Reuse only verified raw content. The URL index is a hint, never authority.
-    index_path = root / "downloads.json"
-    try:
-        old_index = json.loads(index_path.read_text())
-    except (OSError, ValueError):
-        old_index = {}
-
-    def download(pair: tuple[str, dict]) -> tuple[str, bytes]:
+    def fetch_asset(pair):
         path, item = pair
-        data = None
-        if path in old_index:
-            try:
-                data = _read(root, old_index[path])
-            except (WorkspaceError, TypeError):
-                pass
-        size = item.get("size", 0)
-        if data is None:
-            data = (
-                b""
-                if size == 0 and item["hash"] == "00000000"
-                else _get(path, limit=size)
-            )
-        if len(data) != size or f"{zlib.crc32(data) & 0xFFFFFFFF:08x}" != item["hash"]:
-            raise WorkspaceError(f"Offline resource checksum mismatch: {path}")
-        return path, data
+        url = ORIGIN + path
+        expected = {"size": item.get("size", 0), "hash": item["hash"]}
+        info = download(
+            url,
+            cache_path(root, path),
+            expected,
+            opener=build_opener(_OfficialRedirects()).open,
+        )
+        return path, {**info, "source_url": url}
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for path, data in pool.map(download, downloads.items()):
-            add(path, data)
-            old_index[path] = files[path]["sha256"]
-            if len(old_index) % 32 == 0:
-                journal = root / "downloads.part"
-                journal.write_bytes(json_bytes(old_index))
-                journal.replace(index_path)
-    index_path.write_bytes(json_bytes(old_index))
+        files.update(pool.map(fetch_asset, downloads.items()))
     for path in PLAYER_PATHS:
         add(path, _get(path, limit=8 * 1024 * 1024))
-    # Immutable bundle ID pins the Player digest, every source version and the
-    # resource selection together. No floating CDN tags are read when serving.
-    bundle = {
-        "format": 1,
+    metadata = {
+        "format": 2,
         "origin": ORIGIN,
         "versions": versions,
         "files": files,
@@ -333,39 +284,41 @@ def sync_offline(
             "resources": sorted(resources or []),
         },
     }
-    body = json_bytes(bundle)
-    bundle_id = digest(body)
-    snapshots = root / "snapshots"
-    snapshots.mkdir(parents=True, exist_ok=True)
-    (snapshots / f"{bundle_id}.json").write_bytes(body)
-    temporary = root / "current.part"
-    temporary.write_text(bundle_id + "\n")
-    temporary.replace(root / "current")
-    return bundle_id
+    temporary = root / "cache.json.part"
+    temporary.write_bytes(json_bytes(metadata))
+    temporary.replace(ready)
+    return root
 
 
-class OfflineBundle:
-    def __init__(self, root: Path, bundle_id: str | None = None):
+def signature(path: Path) -> tuple:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+class OfflineCache:
+    def __init__(self, root: Path):
         self.root = root
+        self.ready = root / "cache.json"
+        self.rendered = {}
+        self.signatures = {}
         try:
-            self.id = bundle_id or (root / "current").read_text().strip()
-            _object(root, self.id)  # Validate before constructing a path.
-            body = (root / "snapshots" / f"{self.id}.json").read_bytes()
-            if digest(body) != self.id:
-                raise WorkspaceError("Offline snapshot metadata checksum mismatch")
-            self.metadata = json.loads(body)
-            if self.metadata["format"] != 1 or self.metadata["origin"] != ORIGIN:
-                raise WorkspaceError("Unsupported offline snapshot format/origin")
+            self.metadata = json.loads(self.ready.read_bytes())
+            self.ready_signature = signature(self.ready)
+            if self.metadata["format"] != 2 or self.metadata["origin"] != ORIGIN:
+                raise WorkspaceError("Unsupported offline cache; run web-offline sync")
             self.files = self.metadata["files"]
             for path, item in self.files.items():
-                if (
-                    not path.startswith("/src/")
-                    or ".." in path
-                    or item["url"] != ORIGIN + path
-                ):
-                    raise WorkspaceError(f"Invalid offline source: {path}")
-                if len(_read(root, item["sha256"])) != item["size"]:
-                    raise WorkspaceError(f"Offline size mismatch: {path}")
+                file = cache_path(root, path)
+                if not {
+                    "size",
+                    "hash",
+                    "sha256",
+                    "source_url",
+                } <= item.keys() or not matches(file_checks(file), item):
+                    raise WorkspaceError(
+                        f"Offline cache corrupt: {path}; run web-offline sync"
+                    )
+                self.signatures[path] = signature(file)
             self.runtime_paths = {}
             selected = {tuple(pair) for pair in self.metadata["selected"]}
             for name in SOURCES:
@@ -382,11 +335,10 @@ class OfflineBundle:
                 for f in manifest["files"]:
                     if (name, f["uuid"]) in selected and not f.get("source"):
                         for variant in variants(f):
-                            raw = self.raw(asset_path(name, variant))
+                            item = self.files.get(asset_path(name, variant), {})
                             if (
-                                len(raw) != variant.get("size", 0)
-                                or f"{zlib.crc32(raw) & 0xFFFFFFFF:08x}"
-                                != variant["hash"]
+                                item.get("size") != variant.get("size", 0)
+                                or item.get("hash") != variant["hash"]
                             ):
                                 raise WorkspaceError(
                                     f"Offline manifest checksum mismatch: {name}/{f['fs_path']}"
@@ -410,22 +362,39 @@ class OfflineBundle:
             if len(self.runtime_paths) != 3:
                 raise WorkspaceError("Offline Runtime incomplete")
             for path in (*PLAYER_PATHS, *self.runtime_paths.values()):
-                self.raw(path)
+                self.file(path)
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise WorkspaceError(
-                f"Offline snapshot unavailable/invalid: {error}; run web-offline sync"
+                f"Offline cache incomplete/invalid: {error}; run web-offline sync"
             ) from error
 
-    def raw(self, path: str) -> bytes:
-        item = self.files.get(path)
-        if item is None:
+    def file(self, path: str) -> Path:
+        if path not in self.files:
             raise WorkspaceError(
-                f"Offline resource not prepared: {path}; resync with --official-resource or --official-group"
+                f"Offline resource not prepared: {path}; resync the resource selection"
             )
-        return _read(self.root, item["sha256"])
+        file = cache_path(self.root, path)
+        try:
+            if (
+                signature(self.ready) != self.ready_signature
+                or signature(file) != self.signatures[path]
+            ):
+                raise OSError("cache changed")
+        except OSError as error:
+            raise WorkspaceError(
+                f"Offline cache changed or missing: {path}; sync and restart"
+            ) from error
+        return file
+
+    def raw(self, path: str) -> bytes:
+        return self.file(path).read_bytes()
 
     def render(self, path: str, base: str) -> bytes:
-        data = self.raw(path)
+        file = self.file(path)
+        key = (path, base)
+        if key in self.rendered:
+            return self.rendered[key]
+        data = file.read_bytes()
         if path.endswith((".js", ".mjs", ".json")):
             data = data.replace(ORIGIN.encode(), base.encode())
             if path.endswith(".json") and "/manifest-" in path:
@@ -443,4 +412,5 @@ class OfflineBundle:
                         if f.get("fs_path") not in DOCUMENTATION_PATHS
                     ]
                 data = json_bytes(manifest)
+        self.rendered[key] = data
         return data

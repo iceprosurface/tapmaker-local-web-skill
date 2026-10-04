@@ -6,7 +6,7 @@ import sys
 import tomllib
 
 from .config import WorkspaceError, direct_project
-from .offline import OfflineBundle, sync_offline
+from .offline import OfflineCache, sync_offline
 from .server import (
     LocalWebProject,
     current_web_runtime,
@@ -42,7 +42,6 @@ def parser() -> argparse.ArgumentParser:
     web.add_argument("--runtime", choices=("auto", "local", "remote"), default="auto")
     web.add_argument("--runtime-cache", type=Path)
     web.add_argument("--offline-cache", type=Path, help="使用完整离线缓存包（拒绝外联）")
-    web.add_argument("--offline-snapshot", help="固定离线缓存包 SHA256")
     web.add_argument("--no-platform-mock", action="store_true")
     web.add_argument(
         "--orientation",
@@ -68,7 +67,6 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024)
     status = commands.add_parser("status")
     status.add_argument("--cache", type=Path, required=True)
-    status.add_argument("--snapshot")
     return result
 
 
@@ -77,8 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "web-offline":
             if args.offline_command == "status":
-                bundle = OfflineBundle(args.cache, args.snapshot)
-                print(f"Verified offline snapshot {bundle.id}; {len(bundle.files)} files")
+                bundle = OfflineCache(args.cache)
+                print(f"Verified offline cache; {len(bundle.files)} files")
                 return 0
             if bool(args.code) != bool(args.entry):
                 raise WorkspaceError("--code and --entry must be supplied together")
@@ -101,8 +99,6 @@ def main(argv: list[str] | None = None) -> int:
             print(runtime if runtime is not None else f"未同步（缓存目录：{cache}）")
             return 0 if runtime is not None else 1
 
-        if args.offline_snapshot and not args.offline_cache:
-            raise WorkspaceError("--offline-snapshot requires --offline-cache")
         if args.offline_cache and (args.runtime != "auto" or args.runtime_cache):
             raise WorkspaceError("--offline-cache cannot be combined with --runtime/--runtime-cache")
         project = direct_project(args.code, args.entry)
@@ -115,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_cache=args.runtime_cache,
             platform_mock=not args.no_platform_mock,
             orientation=args.orientation,
-            offline=OfflineBundle(args.offline_cache, args.offline_snapshot) if args.offline_cache else None,
+            offline=OfflineCache(args.offline_cache) if args.offline_cache else None,
         )
         return 0
     except (WorkspaceError, KeyError, ValueError, OSError, tomllib.TOMLDecodeError) as error:

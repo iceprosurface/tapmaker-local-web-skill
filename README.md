@@ -484,8 +484,8 @@ uv run --project skills/tapmaker-local-web/scripts tapmaker-local-web web \
   --offline-cache /absolute/path/to/offline-cache --no-open
 ```
 
-同步输出内容寻址的 SHA256 快照 ID。用 `web --offline-snapshot <ID>` 或
-`web-offline status --snapshot <ID>` 固定旧快照，不跟随之后的同步。
+缓存只有一份当前内容：`src/` 保存原始文件，`cache.json` 记录版本、来源与校验值，
+同时表示同步完成。不提供历史快照、回滚或快照选择参数。
 `--offline-cache` 不与 `--runtime`/`--runtime-cache` 混用，只允许绑定 `127.0.0.1`。
 
 离线包包含 Player、二维码/调试/录像脚本依赖、固定版本的引擎启动清单、Runtime、engine-startup、urhox-libs、
@@ -504,15 +504,20 @@ tapmaker-local-web web-offline sync --cache /path/to/cache \
 运行时请求未准备的资源会返回 503，终端标明路径及补充同步方法，绝不代理或回退 CDN。
 源码热重载不会自动扩展离线包；新增官方资源引用后应重新同步并重启服务。
 
-每个快照记录来源 HTTPS URL、来源 version/client、原始清单、文件大小/CRC32 和本地
+`cache.json` 记录来源 HTTPS URL、来源 version/client、原始清单、文件大小/CRC32 和本地
 SHA256 内容摘要。Player 无上游版本清单，使用 HTTPS 获取时的 SHA256 固定其精确字节；
 摘要用于完整性和可复现性，不是第三方签名。原始文件不改写；服务端在内存中将已知官方
 CDN 地址映射到缓存路由（包含 WASM/Lua 内构造 URL 的 fetch/XHR 适配），并移除可能包含未选资源的大型 pak 引用，使用逐文件资源。
 HTTP 页面施加仅允许同源的 CSP；任意外部 API、登录、广告、上传和联机均不属于离线契约。
 未知 Player 新依赖会明确失败，需要升级适配和重新验收，而不会自动下载未知地址。
 
-`status` 与启动都校验快照元数据、全部已缓存文件及引擎版本配套。缓存丢失、损坏或版本
-混用时失败；重新同步可修复文件。现有 `web-runtime sync/status` 也会校验 CRC32，
+`status` 与启动都校验全部文件大小、CRC32、SHA256 及引擎版本配套。缓存丢失、损坏或版本
+混用时失败。请求期间检查文件是否变化，二进制沿用流式服务，改写后的文本按 URL 缓存，
+不重复读取并哈希大型文件。
+
+同步前先停止预览服务。同步开始即删除 `cache.json`，文件下载到临时 `.part`，校验后替换；
+只有全部成功才重新写入 `cache.json`。失败时缓存不可启动，重试会校验并复用已下载文件，
+没有自动回退。同步后重启服务。现有 `web-runtime sync/status` 也会校验 CRC32，
 不会再把同大小损坏文件视为可用；无有效 Runtime 时 status 返回非零状态。
 大型第三方资源仅保存在用户指定缓存中，不提交到此仓库。
 

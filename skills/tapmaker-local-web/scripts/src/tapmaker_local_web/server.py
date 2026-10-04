@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import gzip
 import json
 import mimetypes
 import os
@@ -21,7 +20,8 @@ import zlib
 from watchfiles import watch
 
 from .config import Project, WorkspaceError, _render_build_info
-from .offline import OfflineBundle, ORIGIN, PREFIX, CSP
+from .cache import download, file_checks, matches
+from .offline import OfflineCache, ORIGIN, PREFIX, CSP
 
 
 ENGINE_BASE_URL = "https://tapcode-sce.spark.xd.com/src/engine/"
@@ -98,13 +98,7 @@ def current_web_runtime(cache_root: Path | None = None) -> Path | None:
 
 def _valid_runtime_file(path: Path, metadata: dict) -> bool:
     try:
-        crc = 0
-        size = 0
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                crc = zlib.crc32(block, crc)
-                size += len(block)
-        return size == metadata["size"] and f"{crc & 0xffffffff:08x}" == metadata["hash"]
+        return matches(file_checks(path), {"size": metadata["size"], "hash": metadata["hash"]})
     except (OSError, KeyError, TypeError):
         return False
 
@@ -168,28 +162,7 @@ def sync_web_runtime(
         extension = str(item.get("ext") or Path(name).suffix)
         asset_name = f"{item['uuid']}-{item['hash']}{extension}"
         destination = runtime / name
-        expected_size = int(item["size"])
-        if _valid_runtime_file(destination, item):
-            continue
-        temporary = runtime / f".{name}.part"
-        request = Request(base + "assets/" + asset_name, headers={"Accept-Encoding": "identity"})
-        try:
-            with urlopen(request) as response, temporary.open("wb") as output:
-                content = (
-                    gzip.GzipFile(fileobj=response)
-                    if response.headers.get("Content-Encoding") == "gzip"
-                    else response
-                )
-                shutil.copyfileobj(content, output)
-        except OSError:
-            temporary.unlink(missing_ok=True)
-            raise
-        data = temporary.read_bytes()
-        actual_hash = f"{zlib.crc32(data) & 0xFFFFFFFF:08x}"
-        if len(data) != expected_size or actual_hash != str(item["hash"]):
-            temporary.unlink(missing_ok=True)
-            raise WorkspaceError(f"Web Runtime 文件校验失败：{name}")
-        temporary.replace(destination)
+        download(base + "assets/" + asset_name, destination, {"size": int(item["size"]), "hash": item["hash"]})
 
     metadata = {"version": version, "client": client, "files": files}
     (runtime / "runtime.json").write_text(
@@ -787,7 +760,7 @@ class LocalWebServer(ThreadingHTTPServer):
         runtime_dir: Path | None = None,
         *,
         orientation: str = "landscape",
-        offline: OfflineBundle | None = None,
+        offline: OfflineCache | None = None,
     ):
         if orientation not in ORIENTATION_SIZES:
             available = ", ".join(ORIENTATION_SIZES)
@@ -957,6 +930,12 @@ class _LocalWebHandler(BaseHTTPRequestHandler):
                     offline_path = self.server.offline.runtime_paths[path.removeprefix("/")]
                 if offline_path is not None:
                     try:
+                        file = self.server.offline.file(offline_path)
+                        media = mimetypes.guess_type(offline_path)[0] or "application/octet-stream"
+                        if file.suffix not in (".js", ".mjs", ".json"):
+                            self._send_file(file, media, head_only, cache_control=RUNTIME_CACHE_CONTROL,
+                                            etag='"' + self.server.offline.files[offline_path]["sha256"] + '"')
+                            return
                         data = self.server.offline.render(offline_path, self._offline_base())
                     except WorkspaceError as error:
                         print(str(error), file=sys.stderr, flush=True)
@@ -1168,7 +1147,7 @@ def serve_local_web(
     runtime_cache: Path | None = None,
     platform_mock: bool = True,
     orientation: str = "landscape",
-    offline: OfflineBundle | None = None,
+    offline: OfflineCache | None = None,
 ) -> None:
     state = LocalWebProject(project, deployment, platform_mock=platform_mock)
     if offline is not None and host != "127.0.0.1":
@@ -1186,7 +1165,7 @@ def serve_local_web(
     print("源码变化后页面会自动重新加载；按 Ctrl-C 停止。")
     print(f"Runtime={'离线缓存包' if offline else ('本地 ' + str(runtime_dir) if runtime_dir else '远程 CDN')}")
     if offline is not None:
-        print(f"Offline snapshot={offline.id}; external requests blocked; no CDN fallback")
+        print(f"Offline cache={offline.root}; external requests blocked; no CDN fallback")
     print(f"平台能力={'本地 mock' if platform_mock else 'Runtime 原始能力'}")
     width, height = ORIENTATION_SIZES[orientation]
     print(f"预览方向={orientation} ({width}x{height})")

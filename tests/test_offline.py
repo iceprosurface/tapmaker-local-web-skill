@@ -14,16 +14,17 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 import zlib
 
+from tapmaker_local_web.cache import download
 from tapmaker_local_web.config import WorkspaceError, direct_project
 from tapmaker_local_web.offline import (
     _get,
     _OfficialRedirects,
-    OfflineBundle,
+    OfflineCache,
     ORIGIN,
     PREFIX,
     PLAYER_PATHS,
     asset_path,
-    digest,
+    cache_path,
     json_bytes,
     sync_offline,
 )
@@ -97,19 +98,33 @@ class OfflineTest(unittest.TestCase):
         self.fetch = patch("tapmaker_local_web.offline._get", side_effect=self.get)
         self.fetch.start()
 
+        def open_asset(request, **kwargs):
+            response = io.BytesIO(self.get(request.full_url.removeprefix(ORIGIN)))
+            response.headers = {}
+            return response
+
+        self.download = patch(
+            "tapmaker_local_web.offline.download",
+            side_effect=lambda url, dest, expected, **kw: download(
+                url, dest, expected, opener=open_asset
+            ),
+        )
+        self.download.start()
+
     def get(self, path, **kwargs):
         self.calls.append(path)
         return self.remote[path]
 
     def tearDown(self):
         self.fetch.stop()
+        self.download.stop()
         self.temp.cleanup()
 
     def sync(self, **kwargs):
         return sync_offline(self.cache, **kwargs)
 
     def test_default_is_bounded_and_does_not_download_unused_official_assets(self):
-        bundle = OfflineBundle(self.cache, self.sync())
+        bundle = OfflineCache(self.sync())
         self.assertEqual(len(bundle.runtime_paths), 3)
         path = asset_path("official-res", self.manifests["official-res"]["files"][1])
         self.assertNotIn(path, self.calls)
@@ -117,9 +132,7 @@ class OfflineTest(unittest.TestCase):
             bundle.raw(path)
 
     def test_literal_selection_follows_reference_closure(self):
-        bundle = OfflineBundle(
-            self.cache, self.sync(texts='load("Characters/hero.xml")')
-        )
+        bundle = OfflineCache(self.sync(texts='load("Characters/hero.xml")'))
         for f in self.manifests["official-res"]["files"]:
             self.assertEqual(
                 bundle.raw(asset_path("official-res", f)),
@@ -131,7 +144,7 @@ class OfflineTest(unittest.TestCase):
             {"resources": ["Characters/hero.xml"]},
             {"groups": ["characters"]},
         ):
-            bundle = OfflineBundle(self.cache, self.sync(**kwargs))
+            bundle = OfflineCache(self.sync(**kwargs))
             self.assertIn(
                 asset_path("official-res", self.manifests["official-res"]["files"][2]),
                 bundle.files,
@@ -150,61 +163,82 @@ class OfflineTest(unittest.TestCase):
 
     def test_same_size_corruption_and_missing_object_fail_status(self):
         for delete in (False, True):
-            bundle = OfflineBundle(self.cache, self.sync())
-            path = self.cache / "objects" / bundle.files[PLAYER_PATHS[0]]["sha256"]
+            bundle = OfflineCache(self.sync())
+            path = cache_path(self.cache, PLAYER_PATHS[0])
             if delete:
                 path.unlink()
             else:
                 path.write_bytes(b"x" * path.stat().st_size)
-            with self.assertRaisesRegex(WorkspaceError, "cache (corrupt|missing)"):
-                OfflineBundle(self.cache)
+            with self.assertRaisesRegex(WorkspaceError, "cache (corrupt|incomplete)"):
+                OfflineCache(self.cache)
 
-    def test_corrupt_download_never_publishes_snapshot(self):
-        self.sync()
-        previous = (self.cache / "current").read_text()
+    def test_failed_sync_invalidates_readiness_and_retry_repairs(self):
+        bundle = OfflineCache(self.sync())
         f = self.manifests["engine"]["files"][0]
-        (self.cache / "downloads.json").unlink()
-        self.remote[asset_path("engine", f)] = b"x" * f["size"]
+        path = asset_path("engine", f)
+        cache_path(self.cache, path).unlink()
+        original = self.remote[path]
+        self.remote[path] = b"x" * f["size"]
         with self.assertRaisesRegex(WorkspaceError, "checksum mismatch"):
             self.sync()
-        self.assertEqual(previous, (self.cache / "current").read_text())
+        self.assertFalse((self.cache / "cache.json").exists())
+        self.assertFalse(list(self.cache.rglob("*.part")))
+        with self.assertRaisesRegex(WorkspaceError, "changed or missing"):
+            bundle.raw(PLAYER_PATHS[0])
+        self.remote[path] = original
+        self.assertEqual(OfflineCache(self.sync()).raw(path), original)
 
-    def test_pinned_snapshot_survives_player_update_without_network(self):
-        first = self.sync()
+    def test_current_cache_replaces_player_and_serves_without_network(self):
+        self.sync()
         self.remote[PLAYER_PATHS[0]] = b"new player"
-        second = self.sync()
-        self.assertNotEqual(first, second)
+        self.sync()
         with patch(
-            "tapmaker_local_web.offline._get",
+            "urllib.request.OpenerDirector.open",
             side_effect=AssertionError("network forbidden"),
         ):
-            old = OfflineBundle(self.cache, first)
-            self.assertNotEqual(
-                old.raw(PLAYER_PATHS[0]), OfflineBundle(self.cache).raw(PLAYER_PATHS[0])
+            self.assertEqual(
+                OfflineCache(self.cache).raw(PLAYER_PATHS[0]), b"new player"
             )
+        self.assertEqual({p.name for p in self.cache.iterdir()}, {"src", "cache.json"})
 
-    def test_modified_metadata_is_rejected(self):
-        key = self.sync()
-        p = self.cache / "snapshots" / f"{key}.json"
-        p.write_bytes(p.read_bytes().replace(b"1.0", b"2.0"))
-        with self.assertRaisesRegex(WorkspaceError, "metadata checksum"):
-            OfflineBundle(self.cache)
+    def test_missing_checksum_metadata_is_rejected(self):
+        self.sync()
+        p = self.cache / "cache.json"
+        data = json.loads(p.read_bytes())
+        del data["files"][PLAYER_PATHS[0]]["sha256"]
+        p.write_bytes(json_bytes(data))
+        with self.assertRaisesRegex(WorkspaceError, "corrupt"):
+            OfflineCache(self.cache)
 
-    def test_version_mixing_rejected_even_with_new_snapshot_id(self):
-        key = self.sync()
-        data = json.loads((self.cache / "snapshots" / f"{key}.json").read_bytes())
+    def test_version_mixing_rejected(self):
+        self.sync()
+        p = self.cache / "cache.json"
+        data = json.loads(p.read_bytes())
         data["versions"]["engine"]["version"] = "2.0"
-        body = json_bytes(data)
-        new = digest(body)
-        (self.cache / "snapshots" / f"{new}.json").write_bytes(body)
+        p.write_bytes(json_bytes(data))
         with self.assertRaisesRegex(WorkspaceError, "version mismatch"):
-            OfflineBundle(self.cache, new)
+            OfflineCache(self.cache)
 
     def test_paths_cannot_escape_cache(self):
-        with self.assertRaises(WorkspaceError):
-            OfflineBundle(self.cache, "../../elsewhere")
+        for path in ("/src/../escape", "/src//escape", "/etc/passwd"):
+            with self.assertRaises(WorkspaceError):
+                cache_path(self.cache, path)
         with self.assertRaises(WorkspaceError):
             asset_path("engine", {"uuid": "../escape", "hash": "123", "ext": ".js"})
+
+    def test_repeated_reads_do_not_rehash_and_mutation_fails_closed(self):
+        bundle = OfflineCache(self.sync())
+        path = PLAYER_PATHS[0]
+        with patch(
+            "tapmaker_local_web.offline.file_checks",
+            side_effect=AssertionError("unexpected rehash"),
+        ):
+            first = bundle.render(path, "http://127.0.0.1:1")
+            self.assertIs(first, bundle.render(path, "http://127.0.0.1:1"))
+            bundle.raw(path)
+            cache_path(self.cache, path).write_bytes(b"x" * len(self.remote[path]))
+            with self.assertRaisesRegex(WorkspaceError, "changed"):
+                bundle.render(path, "http://127.0.0.1:1")
 
     def test_unknown_manifest_origin_is_rejected_before_asset_download(self):
         manifest = self.manifests["official-res"]
@@ -232,7 +266,7 @@ class OfflineTest(unittest.TestCase):
             self.remote[asset_path("engine-res", item)] = data
         manifest_path = "/src/engine-res/1.0/manifest-engine-res.json"
         self.remote[manifest_path] = json_bytes(manifest)
-        bundle = OfflineBundle(self.cache, self.sync())
+        bundle = OfflineCache(self.sync())
         served = json.loads(bundle.render(manifest_path, "http://127.0.0.1:1"))
         paths = {f["fs_path"] for f in served["files"]}
         self.assertNotIn("Fonts/read_me.html", paths)
@@ -251,27 +285,23 @@ class OfflineTest(unittest.TestCase):
         self.remote["/src/engine-res/1.0/manifest-engine-res.json"] = json_bytes(
             self.manifests["engine-res"]
         )
-        bundle = OfflineBundle(self.cache, self.sync())
+        bundle = OfflineCache(self.sync())
         self.assertEqual(bundle.raw(path), data)
-        (self.cache / "objects" / bundle.files[path]["sha256"]).write_bytes(
-            b"x" * len(data)
-        )
+        (cache_path(self.cache, path)).write_bytes(b"x" * len(data))
         with self.assertRaisesRegex(WorkspaceError, "corrupt"):
-            OfflineBundle(self.cache)
+            OfflineCache(self.cache)
 
     def test_missing_wasm_abi_descriptor_is_rejected(self):
-        key = self.sync()
-        p = self.cache / "snapshots" / f"{key}.json"
+        self.sync()
+        p = self.cache / "cache.json"
         value = json.loads(p.read_bytes())
         del value["files"]["/src/engine-res/wasm-1.0.json"]
-        body = json_bytes(value)
-        key = digest(body)
-        (self.cache / "snapshots" / f"{key}.json").write_bytes(body)
+        p.write_bytes(json_bytes(value))
         with self.assertRaisesRegex(WorkspaceError, "not prepared"):
-            OfflineBundle(self.cache, key)
+            OfflineCache(self.cache)
 
     def test_http_serves_local_player_manifests_and_fails_closed(self):
-        bundle = OfflineBundle(self.cache, self.sync())
+        bundle = OfflineCache(self.sync())
         project = self.root / "project"
         project.mkdir()
         (project / "main.lua").write_text("return true")
@@ -298,8 +328,15 @@ class OfflineTest(unittest.TestCase):
                     base + PREFIX + "/src/engine/1.0/manifest-engine.json"
                 ) as r:
                     self.assertEqual(json.load(r)["assets_pak"], 0)
-                with urlopen(base + "/UrhoXRuntime.wasm") as r:
-                    self.assertEqual("application/wasm", r.headers["Content-Type"])
+                with patch.object(
+                    bundle, "render", side_effect=AssertionError("binary must stream")
+                ):
+                    with urlopen(base + "/UrhoXRuntime.wasm") as r:
+                        self.assertEqual("application/wasm", r.headers["Content-Type"])
+                        self.assertEqual(
+                            r.read(),
+                            bundle.raw(bundle.runtime_paths["UrhoXRuntime.wasm"]),
+                        )
                 with self.assertRaises(HTTPError) as error:
                     urlopen(base + PREFIX + "/src/official-res/assets/not-cached")
                 self.assertEqual(error.exception.code, 503)
@@ -320,6 +357,49 @@ class DownloadTest(unittest.TestCase):
             self.assertEqual(
                 _get("/src/engine/assets/example", limit=13), b"asset content"
             )
+
+    def test_shared_download_streams_gzip_checks_reuse_and_cleans_failed_temp(self):
+        content = b"asset content" * 100000
+        expected = {"size": len(content), "hash": f"{zlib.crc32(content):08x}"}
+
+        def response(data):
+            result = io.BytesIO(gzip.compress(data))
+            result.headers = {"Content-Encoding": "gzip"}
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "asset"
+            with patch(
+                "pathlib.Path.read_bytes", side_effect=AssertionError("whole-file read")
+            ):
+                download(
+                    "https://example.test/asset",
+                    target,
+                    expected,
+                    opener=lambda *a, **k: response(content),
+                )
+                download(
+                    "https://example.test/asset",
+                    target,
+                    expected,
+                    opener=lambda *a, **k: self.fail("verified file should be reused"),
+                )
+            target.write_bytes(b"x" * len(content))
+            with self.assertRaisesRegex(WorkspaceError, "exceeds"):
+                download(
+                    "https://example.test/asset",
+                    target,
+                    expected,
+                    opener=lambda *a, **k: response(content + b"extra"),
+                )
+            self.assertFalse(target.with_name("asset.part").exists())
+            download(
+                "https://example.test/asset",
+                target,
+                expected,
+                opener=lambda *a, **k: response(content),
+            )
+            self.assertEqual(target.read_bytes(), content)
 
     def test_redirect_does_not_downgrade_tls_or_contact_another_origin(self):
         handler = _OfficialRedirects()
