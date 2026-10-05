@@ -31,8 +31,6 @@ from tapmaker_local_web.offline import (
 from tapmaker_local_web.server import (
     LocalWebProject,
     LocalWebServer,
-    current_web_runtime,
-    sync_web_runtime,
 )
 
 
@@ -161,16 +159,24 @@ class OfflineTest(unittest.TestCase):
             self.sync(max_bytes=1)
         self.assertFalse(any("/assets/" in p for p in self.calls))
 
-    def test_same_size_corruption_and_missing_object_fail_status(self):
-        for delete in (False, True):
-            bundle = OfflineCache(self.sync())
-            path = cache_path(self.cache, PLAYER_PATHS[0])
-            if delete:
-                path.unlink()
-            else:
-                path.write_bytes(b"x" * path.stat().st_size)
-            with self.assertRaisesRegex(WorkspaceError, "cache (corrupt|incomplete)"):
-                OfflineCache(self.cache)
+    def test_same_size_corruption_and_missing_files_fail_offline_status(self):
+        paths = (
+            PLAYER_PATHS[0],
+            asset_path("engine", self.manifests["engine"]["files"][1]),
+        )
+        for name in paths:
+            for delete in (False, True):
+                with self.subTest(path=name, delete=delete):
+                    self.sync()
+                    path = cache_path(self.cache, name)
+                    if delete:
+                        path.unlink()
+                    else:
+                        path.write_bytes(b"x" * path.stat().st_size)
+                    with self.assertRaisesRegex(
+                        WorkspaceError, "cache (corrupt|incomplete)"
+                    ):
+                        OfflineCache(self.cache)
 
     def test_failed_sync_invalidates_readiness_and_retry_repairs(self):
         bundle = OfflineCache(self.sync())
@@ -409,45 +415,6 @@ class DownloadTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(WorkspaceError, "outside"):
                 handler.redirect_request(None, None, 302, "", {}, url)
-
-
-class RuntimeIntegrityTest(unittest.TestCase):
-    def test_sync_repairs_same_size_corruption_and_status_rejects_incomplete_cache(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source"
-            assets = source / "assets"
-            assets.mkdir(parents=True)
-            (source / "1").mkdir()
-            files = []
-            for name in ("UrhoXRuntime.js", "UrhoXRuntime.wasm", "UrhoXRuntime.data"):
-                data = name.encode()
-                crc = f"{zlib.crc32(data):08x}"
-                f = {
-                    "uuid": name,
-                    "hash": crc,
-                    "size": len(data),
-                    "ext": Path(name).suffix,
-                    "fs_path": name,
-                }
-                files.append(f)
-                (assets / f"{name}-{crc}{f['ext']}").write_bytes(data)
-            (source / "latest.json").write_text('{"version":"1","client":"a"}')
-            (source / "1/manifest-a.json").write_bytes(json_bytes({"files": files}))
-            cache = root / "cache"
-            runtime = sync_web_runtime(cache, engine_base_url=source.as_uri())
-            target = runtime / "UrhoXRuntime.wasm"
-            target.write_bytes(b"x" * target.stat().st_size)
-            self.assertIsNone(current_web_runtime(cache))
-            sync_web_runtime(cache, engine_base_url=source.as_uri())
-            self.assertEqual(target.read_bytes(), b"UrhoXRuntime.wasm")
-            self.assertEqual(current_web_runtime(cache), runtime)
-            target.unlink()
-            self.assertIsNone(current_web_runtime(cache))
-            (runtime / "runtime.json").write_text("{}")
-            self.assertIsNone(current_web_runtime(cache))
 
 
 if __name__ == "__main__":

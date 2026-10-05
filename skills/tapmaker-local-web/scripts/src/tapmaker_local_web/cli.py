@@ -87,8 +87,11 @@ def main(argv: list[str] | None = None) -> int:
                     if item["ext"] in (".lua", ".json", ".xml", ".material", ".prefab"):
                         asset = state.asset(f"{item['uuid']}-{item['hash']}{item['ext']}")
                         texts += asset.read().decode("utf-8", errors="replace") + "\n"
-            print(sync_offline(args.cache, texts=texts, resources=args.official_resource,
-                               groups=args.official_group, max_bytes=args.max_bytes))
+            try:
+                print(sync_offline(args.cache, texts=texts, resources=args.official_resource,
+                                   groups=args.official_group, max_bytes=args.max_bytes))
+            except ValueError as error:
+                raise WorkspaceError(f"Invalid offline manifest: {error}") from error
             return 0
         if args.command == "web-runtime":
             cache = args.cache or web_runtime_cache_root()
@@ -97,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             runtime = current_web_runtime(cache)
             print(runtime if runtime is not None else f"未同步（缓存目录：{cache}）")
-            return 0 if runtime is not None else 1
+            return 0
 
         if args.offline_cache and (args.runtime != "auto" or args.runtime_cache):
             raise WorkspaceError("--offline-cache cannot be combined with --runtime/--runtime-cache")
@@ -114,6 +117,6 @@ def main(argv: list[str] | None = None) -> int:
             offline=OfflineCache(args.offline_cache) if args.offline_cache else None,
         )
         return 0
-    except (WorkspaceError, KeyError, ValueError, OSError, tomllib.TOMLDecodeError) as error:
+    except (WorkspaceError, KeyError, OSError, tomllib.TOMLDecodeError) as error:
         print(f"tapmaker-local-web: {error}", file=sys.stderr)
         return 2

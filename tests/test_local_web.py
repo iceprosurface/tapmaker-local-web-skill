@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import io
+from contextlib import redirect_stdout
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import threading
@@ -11,11 +14,16 @@ from urllib.request import Request, urlopen
 import zlib
 
 from tapmaker_local_web import Workspace
+from tapmaker_local_web.cli import main
+from tapmaker_local_web.config import WorkspaceError
 from tapmaker_local_web.server import (
     LocalWebProject,
     LocalWebServer,
     current_web_runtime,
     sync_web_runtime,
+    serve_local_web,
+    RUNTIME_FILES,
+    PLAYER_SCRIPT_URL,
 )
 
 
@@ -342,6 +350,42 @@ target = "assets"
             server.server_close()
             thread.join(timeout=2)
 
+    def test_normal_status_keeps_success_exit_for_missing_cache(self):
+        cache = self.root / "empty-cache"
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["web-runtime", "status", "--cache", str(cache)]), 0)
+        self.assertIn("未同步", output.getvalue())
+
+    def test_normal_modes_keep_existing_cache_selection_without_integrity_scan(self):
+        cache = self.root / "cache"
+        runtime = cache / "legacy"
+        runtime.mkdir(parents=True)
+        (cache / "current.json").write_text('{"directory":"legacy"}')
+        # Master accepts present files even without runtime.json or valid bytes.
+        for name in RUNTIME_FILES:
+            (runtime / name).write_bytes(b"unverified")
+        with patch("tapmaker_local_web.cache.file_checks", side_effect=AssertionError("offline checks used")):
+            self.assertEqual(current_web_runtime(cache), runtime)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["web-runtime", "status", "--cache", str(cache)]), 0)
+            for mode, expected in (("auto", runtime), ("local", runtime), ("remote", None)):
+                with self.subTest(mode=mode), redirect_stdout(io.StringIO()), patch(
+                    "tapmaker_local_web.server.LocalWebServer", wraps=LocalWebServer
+                ) as factory, patch.object(LocalWebServer, "serve_forever", side_effect=KeyboardInterrupt):
+                    serve_local_web(self.project, port=0, open_browser=False, runtime=mode, runtime_cache=cache)
+                    self.assertEqual(factory.call_args.args[2], expected)
+                    self.assertIsNone(factory.call_args.kwargs["offline"])
+        (runtime / RUNTIME_FILES[0]).unlink()
+        self.assertIsNone(current_web_runtime(cache))
+        with self.assertRaisesRegex(WorkspaceError, "尚未同步"):
+            serve_local_web(self.project, port=0, open_browser=False, runtime="local", runtime_cache=cache)
+        for mode in ("auto", "remote"):
+            with self.subTest(missing_cache=mode), redirect_stdout(io.StringIO()), patch(
+                "tapmaker_local_web.server.LocalWebServer", wraps=LocalWebServer
+            ) as factory, patch.object(LocalWebServer, "serve_forever", side_effect=KeyboardInterrupt):
+                serve_local_web(self.project, port=0, open_browser=False, runtime=mode, runtime_cache=cache)
+                self.assertIsNone(factory.call_args.args[2])
+
     def test_runtime_sync_caches_verified_engine_files_and_serves_them_locally(self) -> None:
         source = self.root / "runtime-source"
         assets = source / "assets"
@@ -386,6 +430,11 @@ target = "assets"
         try:
             self.assertIn("local_engine=true", server.url)
             self.assertIn("screen_orientation=landscape", server.url)
+            with urlopen(server.url) as response:
+                html = response.read()
+                self.assertIn(PLAYER_SCRIPT_URL.encode(), html)
+                self.assertNotIn(b"/__tapmaker/offline", html)
+                self.assertIsNone(response.headers.get("Content-Security-Policy"))
             runtime_url = f"http://127.0.0.1:{server.server_port}/UrhoXRuntime.wasm"
             with urlopen(runtime_url) as response:
                 self.assertEqual(response.headers["Content-Type"], "application/wasm")
@@ -401,6 +450,15 @@ target = "assets"
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+        # Preserve master's size-only reuse; CRC repair is deliberately deferred.
+        target = runtime / "UrhoXRuntime.wasm"
+        corrupt = b"x" * target.stat().st_size
+        target.write_bytes(corrupt)
+        for asset in (source / "assets").iterdir():
+            asset.unlink()  # Reuse must not fetch these now-unavailable assets.
+        self.assertEqual(sync_web_runtime(cache, engine_base_url=source.as_uri()), runtime)
+        self.assertEqual(target.read_bytes(), corrupt)
 
 
 if __name__ == "__main__":

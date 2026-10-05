@@ -1,4 +1,4 @@
-"""Shared streaming download and integrity checks for both local cache modes."""
+"""Streaming download and integrity checks for the opt-in offline cache."""
 
 import gzip
 import hashlib

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import gzip
 import json
 import mimetypes
 import os
@@ -20,7 +21,6 @@ import zlib
 from watchfiles import watch
 
 from .config import Project, WorkspaceError, _render_build_info
-from .cache import download, file_checks, matches
 from .offline import OfflineCache, ORIGIN, PREFIX, CSP
 
 
@@ -86,21 +86,11 @@ def current_web_runtime(cache_root: Path | None = None) -> Path | None:
         if not isinstance(relative, str) or Path(relative).name != relative:
             return None
         runtime = root / relative
-        metadata = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
-        if runtime.name != f"{metadata['version']}-{metadata['client']}":
-            return None
-        if all(_valid_runtime_file(runtime / name, metadata["files"][name]) for name in RUNTIME_FILES):
+        if all((runtime / name).is_file() for name in RUNTIME_FILES):
             return runtime
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, json.JSONDecodeError):
         pass
     return None
-
-
-def _valid_runtime_file(path: Path, metadata: dict) -> bool:
-    try:
-        return matches(file_checks(path), {"size": metadata["size"], "hash": metadata["hash"]})
-    except (OSError, KeyError, TypeError):
-        return False
 
 
 def _runtime_etags(runtime_dir: Path | None) -> dict[str, str]:
@@ -162,7 +152,28 @@ def sync_web_runtime(
         extension = str(item.get("ext") or Path(name).suffix)
         asset_name = f"{item['uuid']}-{item['hash']}{extension}"
         destination = runtime / name
-        download(base + "assets/" + asset_name, destination, {"size": int(item["size"]), "hash": item["hash"]})
+        expected_size = int(item["size"])
+        if destination.is_file() and destination.stat().st_size == expected_size:
+            continue
+        temporary = runtime / f".{name}.part"
+        request = Request(base + "assets/" + asset_name, headers={"Accept-Encoding": "identity"})
+        try:
+            with urlopen(request) as response, temporary.open("wb") as output:
+                content = (
+                    gzip.GzipFile(fileobj=response)
+                    if response.headers.get("Content-Encoding") == "gzip"
+                    else response
+                )
+                shutil.copyfileobj(content, output)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            raise
+        data = temporary.read_bytes()
+        actual_hash = f"{zlib.crc32(data) & 0xFFFFFFFF:08x}"
+        if len(data) != expected_size or actual_hash != str(item["hash"]):
+            temporary.unlink(missing_ok=True)
+            raise WorkspaceError(f"Web Runtime 文件校验失败：{name}")
+        temporary.replace(destination)
 
     metadata = {"version": version, "client": client, "files": files}
     (runtime / "runtime.json").write_text(
