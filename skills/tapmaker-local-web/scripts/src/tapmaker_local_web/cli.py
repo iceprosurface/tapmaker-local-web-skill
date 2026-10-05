@@ -6,7 +6,9 @@ import sys
 import tomllib
 
 from .config import WorkspaceError, direct_project
+from .offline import OfflineCache, sync_offline
 from .server import (
+    LocalWebProject,
     current_web_runtime,
     serve_local_web,
     sync_web_runtime,
@@ -39,6 +41,7 @@ def parser() -> argparse.ArgumentParser:
     web.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     web.add_argument("--runtime", choices=("auto", "local", "remote"), default="auto")
     web.add_argument("--runtime-cache", type=Path)
+    web.add_argument("--offline-cache", type=Path, help="使用完整离线缓存包（拒绝外联）")
     web.add_argument("--no-platform-mock", action="store_true")
     web.add_argument(
         "--orientation",
@@ -53,12 +56,43 @@ def parser() -> argparse.ArgumentParser:
     runtime_sync.add_argument("--cache", type=Path)
     runtime_status = runtime_commands.add_parser("status", help="查看当前本地 Runtime")
     runtime_status.add_argument("--cache", type=Path)
+    offline = subcommands.add_parser("web-offline", help="准备、校验完整离线缓存包")
+    commands = offline.add_subparsers(dest="offline_command", required=True)
+    sync = commands.add_parser("sync")
+    sync.add_argument("--cache", type=Path, required=True)
+    sync.add_argument("--code", type=Path, action="append")
+    sync.add_argument("--entry")
+    sync.add_argument("--official-resource", action="append", default=[])
+    sync.add_argument("--official-group", action="append", default=[])
+    sync.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024)
+    status = commands.add_parser("status")
+    status.add_argument("--cache", type=Path, required=True)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "web-offline":
+            if args.offline_command == "status":
+                bundle = OfflineCache(args.cache)
+                print(f"Verified offline cache; {len(bundle.files)} files")
+                return 0
+            if bool(args.code) != bool(args.entry):
+                raise WorkspaceError("--code and --entry must be supplied together")
+            texts = ""
+            if args.code:
+                state = LocalWebProject(direct_project(args.code, args.entry))
+                for item in state.manifest()["files"]:
+                    if item["ext"] in (".lua", ".json", ".xml", ".material", ".prefab"):
+                        asset = state.asset(f"{item['uuid']}-{item['hash']}{item['ext']}")
+                        texts += asset.read().decode("utf-8", errors="replace") + "\n"
+            try:
+                print(sync_offline(args.cache, texts=texts, resources=args.official_resource,
+                                   groups=args.official_group, max_bytes=args.max_bytes))
+            except ValueError as error:
+                raise WorkspaceError(f"Invalid offline manifest: {error}") from error
+            return 0
         if args.command == "web-runtime":
             cache = args.cache or web_runtime_cache_root()
             if args.runtime_command == "sync":
@@ -68,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
             print(runtime if runtime is not None else f"未同步（缓存目录：{cache}）")
             return 0
 
+        if args.offline_cache and (args.runtime != "auto" or args.runtime_cache):
+            raise WorkspaceError("--offline-cache cannot be combined with --runtime/--runtime-cache")
         project = direct_project(args.code, args.entry)
         serve_local_web(
             project,
@@ -78,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_cache=args.runtime_cache,
             platform_mock=not args.no_platform_mock,
             orientation=args.orientation,
+            offline=OfflineCache(args.offline_cache) if args.offline_cache else None,
         )
         return 0
     except (WorkspaceError, KeyError, OSError, tomllib.TOMLDecodeError) as error:

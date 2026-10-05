@@ -22,6 +22,7 @@ description: 根据本地项目目录和 Lua entry 路径启动、验收和排�
 
 - `--runtime auto` 是默认值：优先本地 Runtime，无缓存时使用 CDN。只在验证本地缓存时用 `local`，在差分 Runtime 缓存问题时用 `remote`。
 - 默认的平台 mock 提供本地用户 `900000001`、昵称与内存云值。它只是游戏侧契约替身，不代表真实登录或云存档。普通本地测试不禁用；只在排查 Runtime 原始行为时使用 `--no-platform-mock`。
+- 需要完整离线时，先按 README 的 `web-offline sync` 准备固定资源包，再用 `web --offline-cache`；动态官方资源用显式选择器补齐。离线服务拒绝外联，不修复或绕过证书问题。
 - Runtime 同步只本地化 `UrhoXRuntime.js`、`UrhoXRuntime.wasm` 和 `UrhoXRuntime.data`。Player 外壳、engine-res、official-res 仍可能访问 CDN；不得宣称完全离线。
 - 当前 Maker 官方标准资源根是 `assets + scripts`。三个及更多显式 `--code` 仅是本地预览扩展兼容，不得据此宣称当前 Maker MCP 远端构建支持三资源根。
 - 本地页面不证明远程项目绑定、计费归属、真实平台账号或 production 行为。需要真实登录、云端数据、排行榜、广告、平台权限或远程预览时，停止本地结论，转入仓库的 项目规定的远程发布流程；未经授权不得触发远程构建。
